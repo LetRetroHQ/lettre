@@ -27,7 +27,7 @@ Claude Code can use the same connector as Claude Desktop and claude.ai. To reach
 1. Run this, with your publication's address:
 
     ```bash
-    bunx lettre login https://newsletter.example.com
+    bunx --package @letretro/lettre-cli lettre login https://newsletter.example.com
     ```
 
 1. Approve the sign-in in the browser that opens. The terminal then says who you're signed in as.

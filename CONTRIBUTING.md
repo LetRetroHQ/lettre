@@ -1,10 +1,12 @@
+<img src="public/lettre-icon.svg" alt="Lettre logo" width="48" height="48">
+
 # Contributing to Lettre
 
 This repository is Lettre's source. To run your own newsletter, you don't need it: the [README](README.md) shows how to try Lettre and deploy an instance.
 
 ## Run the source
 
-With [Node.js](https://nodejs.org/) 22 or later:
+With [Node.js](https://nodejs.org/) 22 or later and [Bun](https://bun.sh/) 1.4.2:
 
 ```bash
 bun install
@@ -12,21 +14,21 @@ cp .dev.vars.example .dev.vars
 bun run dev
 ```
 
-Open the editor at http://localhost:8787/dashboard/. There's nothing to sign in with locally, and email goes to a stand-in that never reaches a real inbox. `.dev.vars.example` explains each local setting, including how the stand-in mimics SES on a send.
+Open the editor at http://localhost:8787/dashboard/ or the public homepage at http://localhost:8787/. There's nothing to sign in with locally, and email goes to a stand-in that never reaches a real inbox. `.dev.vars.example` explains each local setting, including how the stand-in mimics SES on a send.
 
 ### Demo data
 
 The app starts empty. To explore it with content, load **Lettre Journal**, a demo publication kept as Markdown in [`demo/`](demo/):
 
 ```bash
-bun run seed                          # load the demo
-bun run simulate-send --in 90s     # schedule a send and print a link to watch it go out
-bun run reset                         # back to an empty instance
+bun run seed                    # replace local data with the demo
+bun run simulate-send --in 90s  # schedule a simulated send
+bun run reset                   # clear the local database
 ```
 
 ### Calling the API
 
-The editor is one client of Lettre's HTTP API, and Claude is the other. Locally, mint a token to call it yourself:
+The editor and Claude both use Lettre's HTTP API. Locally, mint a token to call it yourself:
 
 ```bash
 TOKEN=$(curl -s http://localhost:8787/api/dev/token?kind=service | jq -r .token)
@@ -42,7 +44,7 @@ The most useful contributions right now are issues and discussion. If something 
 Pull requests are welcome. The ones most likely to be merged come after a discussion on the issue, and:
 
 - open by saying, in plain words, what changes for the people who run, publish, or read a Lettre newsletter, and why;
-- pass `bun run test`, `bun run typecheck`, and `bun run check`;
+- pass `bun run test`, `bun run typecheck`, and `bun run ci`;
 - update the docs they affect in the same commit, as `.claude/CLAUDE.md` describes;
 - close their issue (`Closes #N`) and say what differs from it, if anything.
 

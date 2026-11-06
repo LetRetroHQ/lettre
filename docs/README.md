@@ -1,6 +1,6 @@
 # Self-hosting Lettre
 
-These pages cover deploying and running your own Lettre, from an empty repository to a live newsletter on your Cloudflare account. Writing and sending the newsletter is covered in [Publishing](publishing/README.md). These pages call whoever writes and sends it the publisher, which may be you.
+These pages walk you through deploying and running Lettre on your own Cloudflare account. To write and send a newsletter, see the [publishing guide](publishing/README.md). These pages call whoever writes and sends the newsletter the publisher, which may be you.
 
 ## Get started
 

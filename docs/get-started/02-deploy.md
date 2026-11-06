@@ -7,7 +7,7 @@ In this guide, you choose your hostnames, create your instance's repository, cre
 ## Before you begin
 
 - A [Cloudflare account](https://dash.cloudflare.com/sign-up), with your domain's DNS on Cloudflare. Your app's hostname and its login both live there.
-- [Node.js](https://nodejs.org/) 22 or later, and [Git](https://git-scm.com/).
+- [Node.js](https://nodejs.org/) 22 or later, [Bun](https://bun.sh/) 1.4.2, and [Git](https://git-scm.com/).
 - A GitHub account, or another Git host, for your instance's repository.
 - An AWS account for the newsletter, before [Connect Amazon SES](05-ses.md). [Create an AWS account](04-aws-account.md) walks through it. You can start it now. Signing up needs an email address that receives mail, and AWS can take a while to activate a new account.
 
@@ -37,7 +37,7 @@ Your instance's repository holds its configuration, its database migrations, and
     ```bash
     git clone https://github.com/YOUR_USERNAME/newsletter.git
     cd newsletter
-    bunx lettre init
+    bunx --package @letretro/lettre-cli lettre init
     ```
 
     This writes the instance's files: `wrangler.jsonc` for its settings, `package.json` with the release it runs, the release's database migrations, and a starting point for Claude Code in `.claude/`. The instance's `README.md` lists its commands.

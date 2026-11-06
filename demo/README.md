@@ -1,6 +1,8 @@
-# The demo publication
+<img src="lettre-logo.png" alt="Lettre logo" width="48" height="48">
 
-Everything `bun run seed` loads into a local dev server, apart from the subscribers and send history, lives here. Edit these files and run `bun run seed` again to see the change.
+# Lettre Journal demo
+
+Lettre Journal is the sample publication for local development. With `bun run dev` running, use `bun run seed` in another terminal to load it. **Seeding replaces the local database contents.** Edit these files and seed again to see your changes.
 
 - **`publication.md`**: the identity, as front matter only.
 - **`posts/`**: one folder per post, a page bundle: the post is `index.md`, and any image it shows sits beside it (`1-welcome-to-lettre/lettre-logo.png`). The post refers to the image by its filename, as in `![…](lettre-logo.png)`, so the link resolves when you preview the Markdown, and the seed attaches the file to that post. The number in a folder's name sets its place: sent posts go out oldest first in that order, and a post's id (and so its editor URL) follows its position.
