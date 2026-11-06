@@ -1,0 +1,706 @@
+import { createExecutionContext, SELF } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  BRANDING_LOGO_KEY,
+  DEFAULT_CONFIRMATION_EMAIL,
+  setPublicationLogo,
+  updateSettings,
+} from "../src/db/settings";
+import { confirmationEmail } from "../src/emails/system";
+import { type AppEnv, getConfig } from "../src/env";
+import type { RequestContext } from "../src/router";
+import * as settingsRoutes from "../src/routes/settings";
+import { SES_DEPLOY } from "./support/deploy";
+import {
+  clearLogos,
+  dueSend,
+  logoKeys,
+  resetDatabase,
+  sendingWorks,
+  tick,
+} from "./support/fixtures";
+import { AUTH, base, JSON_AUTH, PNG_1x1 } from "./support/http";
+import { allowErrorLogs, logged } from "./support/log";
+
+// Each test starts from no settings row, so none sees a name, logo, or address another left.
+beforeEach(async () => {
+  await resetDatabase();
+  await sendingWorks();
+  await clearLogos();
+});
+
+async function getSettings() {
+  const res = await SELF.fetch(`${base}/api/settings`, { headers: AUTH });
+  return {
+    res,
+    body: (await res.json()) as {
+      settings: {
+        test_recipients: string[];
+        publication: {
+          name: string;
+          tagline: string;
+          address: string;
+          logo_url: string;
+        };
+        email_template: string;
+        confirmation_email: {
+          subject: string;
+          body: string;
+          button_label: string;
+          reassurance: string;
+        };
+        confirmation_email_default: {
+          subject: string;
+          body: string;
+          button_label: string;
+          reassurance: string;
+        };
+      };
+      deployment: Record<string, unknown>;
+    },
+  };
+}
+
+async function putLogo(bytes: Uint8Array, type: string) {
+  const fd = new FormData();
+  fd.append("file", new File([bytes], "logo", { type }));
+  return SELF.fetch(`${base}/api/settings/logo`, {
+    method: "POST",
+    headers: AUTH,
+    body: fd,
+  });
+}
+
+async function putSettings(patch: unknown) {
+  return SELF.fetch(`${base}/api/settings`, {
+    method: "PUT",
+    headers: JSON_AUTH,
+    body: JSON.stringify(patch),
+  });
+}
+
+/** Subscribe a fresh address (public double opt-in) and return the confirmation email
+ *  the fake transport recorded for it. */
+async function subscribeAndGetConfirmation() {
+  const email = `ce-${crypto.randomUUID()}@example.com`;
+  const sub = await SELF.fetch(`${base}/subscribe`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  expect(sub.ok).toBe(true);
+  const outbox = (await (await SELF.fetch(`${base}/api/dev/outbox`, { headers: AUTH })).json()) as {
+    messages: { to: string; subject: string; html: string; text: string }[];
+  };
+  return outbox.messages.find((m) => m.to === email);
+}
+
+describe("settings API is gated like the rest of the authoring API", () => {
+  it("401s GET without a token", async () => {
+    const res = await SELF.fetch(`${base}/api/settings`);
+    expect(res.status).toBe(401);
+  });
+  it("401s PUT without a token", async () => {
+    const res = await SELF.fetch(`${base}/api/settings`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ test_recipients: ["x@example.com"] }),
+    });
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("settings surface", () => {
+  it("returns defaults + a read-only deployment reflection (no secrets)", async () => {
+    const { res, body } = await getSettings();
+    expect(res.status).toBe(200);
+    expect(body.settings.test_recipients).toEqual([]);
+    // Publication identity starts empty (the reader falls back to the From name).
+    expect(body.settings.publication).toMatchObject({
+      name: "",
+      tagline: "",
+      logo_url: "",
+    });
+    // Reflects the env-resolved config (fake transport in tests)…
+    expect(body.deployment.provider).toBe("fake");
+    expect(typeof body.deployment.from_address).toBe("string");
+    expect(body.deployment.access_configured).toBe(false);
+    // The build stamp rides the same reflection (SPEC §9): present, and no secret.
+    const build = body.deployment.build as { version?: unknown } | undefined;
+    expect(typeof build?.version).toBe("string");
+    // …but never leaks a secret or credential.
+    const keys = Object.keys(body.deployment);
+    for (const leaked of [
+      "awsAccessKeyId",
+      "awsSecretAccessKey",
+      "resendApiKey",
+      "devAuthSecret",
+      "accessAud",
+    ]) {
+      expect(keys).not.toContain(leaked);
+    }
+    // A key renamed would slip past the list above, so look for the values themselves too.
+    expect(JSON.stringify(body)).not.toContain("test-dev-secret");
+  });
+
+  // The suite's own env carries no provider credential, so a deployed env's secrets are
+  // put in front of the handler directly: no value may surface under any key. Not through
+  // the router, because the Access vars make the env non-dev, where the suite's dev token
+  // no longer authenticates.
+  it("reflects no secret value of a deployed env", async () => {
+    const ACCESS = { ACCESS_TEAM_DOMAIN: "team.cloudflareaccess.com", ACCESS_AUD: "aud-tag-7f3e" };
+    for (const deploy of [SES_DEPLOY]) {
+      const e = { ...env, ...deploy, ...ACCESS } as unknown as AppEnv;
+      const req = new Request(`${base}/api/settings`);
+      const res = await settingsRoutes.get({
+        req,
+        env: e,
+        ctx: createExecutionContext(),
+        url: new URL(req.url),
+        params: {},
+        config: getConfig(e),
+        principal: { kind: "human", email: "you@example.com", via: "access" },
+      } as unknown as RequestContext);
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(text).toContain(`"provider":"${deploy.PROVIDER}"`);
+      for (const secret of [
+        "test-dev-secret",
+        SES_DEPLOY.AWS_ACCESS_KEY_ID,
+        SES_DEPLOY.AWS_SECRET_ACCESS_KEY,
+        ACCESS.ACCESS_AUD,
+      ]) {
+        expect(text, deploy.PROVIDER).not.toContain(secret);
+      }
+    }
+  });
+
+  it("persists test recipients (normalized + deduped) and reflects them back", async () => {
+    const put = await putSettings({
+      test_recipients: ["You@Example.com", "you@example.com", "team@example.com"],
+    });
+    expect(put.status).toBe(200);
+    const { body } = await getSettings();
+    expect(body.settings.test_recipients).toEqual(["you@example.com", "team@example.com"]);
+  });
+
+  it("rejects an invalid address with a 400 that names the field, so a client can mark it", async () => {
+    const res = await putSettings({ test_recipients: ["not-an-email"] });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "bad_request",
+      message: "“not-an-email” isn’t a valid email address. Fix or remove it, then save.",
+      field: "test_recipients",
+    });
+  });
+
+  it("names the nested field of a refused value, as the API names it", async () => {
+    const res = await putSettings({ notifications: { to: ["nope"] } });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "bad_request",
+      message: "“nope” isn’t a valid email address. Fix or remove it, then save.",
+      field: "notifications.to",
+    });
+  });
+
+  it("rejects a non-list test_recipients with 400", async () => {
+    const res = await putSettings({ test_recipients: "you@example.com" });
+    expect(res.status).toBe(400);
+  });
+
+  it("refuses a field it doesn't take, naming it, and saves nothing, so an old name is never a silent no-op", async () => {
+    for (const [patch, field] of [
+      [{ testRecipients: ["me@example.com"] }, "testRecipients"],
+      [{ confirmation_email: { buttonLabel: "Go" } }, "confirmation_email.buttonLabel"],
+      [{ publication: { logo_url: "https://x.example/l.png" } }, "publication.logo_url"],
+      [{ notifications: { to: ["me@example.com"], channel: "x" } }, "notifications.channel"],
+    ] as const) {
+      const res = await putSettings(patch);
+      expect([res.status, ((await res.json()) as { field: string }).field]).toEqual([400, field]);
+    }
+    expect((await getSettings()).body.settings.test_recipients).toEqual([]);
+  });
+});
+
+describe("publication identity", () => {
+  it("persists and normalizes name + tagline", async () => {
+    const put = await putSettings({
+      publication: { name: "  Field Notes  ", tagline: "Birding, weekly" },
+    });
+    expect(put.status).toBe(200);
+    const { body } = await getSettings();
+    expect(body.settings.publication.name).toBe("Field Notes");
+    expect(body.settings.publication.tagline).toBe("Birding, weekly");
+  });
+
+  it("themes the public archive index with the name + tagline (a blank name falls back)", async () => {
+    await putSettings({
+      publication: { name: "The Hovering Hunter", tagline: "Notes from the field" },
+    });
+    const html = await (await SELF.fetch(`${base}/`)).text();
+    expect(html).toContain("The Hovering Hunter");
+    expect(html).toContain("Notes from the field");
+
+    // A name saved blank falls back to the From address's display name (wrangler.jsonc's
+    // "Newsletter <newsletter@send.example.com>"), never an empty title.
+    expect((await putSettings({ publication: { name: "   " } })).status).toBe(200);
+    const fallback = await (await SELF.fetch(`${base}/`)).text();
+    expect(fallback).not.toContain("The Hovering Hunter");
+    expect(fallback).toMatch(/<title>[^<]*Newsletter[^<]*<\/title>/);
+  });
+});
+
+describe("email template (wired to the render path)", () => {
+  const withUnsub = (extra = "") =>
+    `<div>{{ .Post.Body }}${extra}<a href="{{ .Email.UnsubscribeURL }}">Unsubscribe</a></div>`;
+
+  it("returns a concrete default template even when none is stored", async () => {
+    const { body } = await getSettings();
+    expect(body.settings.email_template).toContain("{{ .Post.Body }}");
+    expect(body.settings.email_template).toContain("{{ .Email.UnsubscribeURL }}");
+  });
+
+  it("persists a valid template and reflects it back", async () => {
+    const tpl = withUnsub(`<a href="{{ .Email.ViewInBrowserURL }}">View</a>`);
+    const put = await putSettings({ email_template: tpl });
+    expect(put.status).toBe(200);
+    expect(((await put.json()) as { warnings: string[] }).warnings).toEqual([]);
+    expect((await getSettings()).body.settings.email_template).toBe(tpl);
+  });
+
+  it("rejects a template with no unsubscribe link (400) — every email must be leavable", async () => {
+    const res = await putSettings({ email_template: "<div>{{ .Post.Body }}</div>" });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { message?: string }).message ?? "").toMatch(/unsubscribe/i);
+  });
+
+  it("rejects a template with no post body (400)", async () => {
+    const res = await putSettings({
+      email_template: '<a href="{{ .Email.UnsubscribeURL }}">Unsubscribe</a>',
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("warns (but allows) a missing view-in-browser link and unknown variables", async () => {
+    const res = await putSettings({ email_template: withUnsub("{{ made.up }}") });
+    expect(res.status).toBe(200);
+    const warnings = ((await res.json()) as { warnings: string[] }).warnings.join(" ");
+    expect(warnings).toMatch(/view.?in.?browser/i);
+    expect(warnings).toMatch(/made\.up/);
+  });
+
+  it("rejects an empty template (400) instead of silently resetting to the default", async () => {
+    await putSettings({ email_template: withUnsub() });
+    const res = await putSettings({ email_template: "" });
+    expect(res.status).toBe(400);
+    // The previously saved template is untouched — no silent reset to the default.
+    const stored = (await getSettings()).body.settings.email_template;
+    expect(stored).toContain("{{ .Email.UnsubscribeURL }}");
+    expect(stored).not.toContain("Powered by Lettre");
+  });
+
+  it("persists the publication mailing address", async () => {
+    await putSettings({ publication: { address: "123 Marsh Lane, Duluth, MN 55802" } });
+    expect((await getSettings()).body.settings.publication.address).toBe(
+      "123 Marsh Lane, Duluth, MN 55802",
+    );
+  });
+
+  describe("a mailing address the template doesn't print (SPEC §9)", () => {
+    const ADDRESS = "PO Box 1142, Portland, OR 97207";
+    const notPrinted =
+      /mailing address in Settings, but this template doesn’t include the \{\{ \.Publication\.Address \}\} field/;
+    const warningsOf = async (res: Response) =>
+      ((await res.json()) as { warnings: string[] }).warnings;
+    const printsAddress = withUnsub(
+      '<a href="{{ .Email.ViewInBrowserURL }}">View</a><div>{{ .Publication.Address }}</div>',
+    );
+    const dropsAddress = withUnsub('<a href="{{ .Email.ViewInBrowserURL }}">View</a>');
+
+    it("warns, and saves, a template that leaves out an address that is set", async () => {
+      await putSettings({ publication: { address: ADDRESS } });
+      const res = await putSettings({ email_template: dropsAddress });
+      expect(res.status).toBe(200);
+      expect(await warningsOf(res)).toEqual([expect.stringMatching(notPrinted)]);
+      expect((await getSettings()).body.settings.email_template).toBe(dropsAddress);
+    });
+
+    it("warns, and saves, an address the template in effect doesn't print", async () => {
+      await putSettings({ email_template: dropsAddress });
+      const res = await putSettings({ publication: { address: ADDRESS } });
+      expect(res.status).toBe(200);
+      expect(await warningsOf(res)).toEqual([expect.stringMatching(notPrinted)]);
+      expect((await getSettings()).body.settings.publication.address).toBe(ADDRESS);
+    });
+
+    it("says nothing when the address is blank or the template prints it", async () => {
+      await env.DB.prepare("DELETE FROM settings").run();
+      expect(await warningsOf(await putSettings({ email_template: dropsAddress }))).toEqual([]);
+      expect(await warningsOf(await putSettings({ publication: { name: "Marsh" } }))).toEqual([]);
+      // The built-in default prints it.
+      await env.DB.prepare("DELETE FROM settings").run();
+      expect(await warningsOf(await putSettings({ publication: { address: ADDRESS } }))).toEqual(
+        [],
+      );
+      expect(await warningsOf(await putSettings({ email_template: printsAddress }))).toEqual([]);
+    });
+  });
+});
+
+describe("confirmation email copy (SPEC §7)", () => {
+  it("returns the built-in default copy (effective + a default sibling) when none is stored", async () => {
+    const { body } = await getSettings();
+    const ce = body.settings.confirmation_email;
+    expect(ce.subject).toBe("Confirm your subscription");
+    expect(ce.button_label).toBe("Confirm subscription");
+    expect(ce.body).toMatch(/confirm your email/i);
+    // The default sibling lets a client offer "Reset to default" without hardcoding copy.
+    expect(body.settings.confirmation_email_default).toEqual(ce);
+  });
+
+  it("persists edited copy (trimmed) and reflects it back", async () => {
+    const put = await putSettings({
+      confirmation_email: {
+        subject: "  Confirm your Field Notes subscription  ",
+        body: "One tap and you're in.",
+        button_label: "Yes, confirm",
+        reassurance: "",
+      },
+    });
+    expect(put.status).toBe(200);
+    const ce = (await getSettings()).body.settings.confirmation_email;
+    expect(ce.subject).toBe("Confirm your Field Notes subscription");
+    expect(ce.body).toBe("One tap and you're in.");
+    expect(ce.button_label).toBe("Yes, confirm");
+    // A blank reassurance line is allowed (it simply drops the footer).
+    expect(ce.reassurance).toBe("");
+  });
+
+  it("resolves a blank required field back to the built-in default (never wordless)", async () => {
+    await putSettings({ confirmation_email: { subject: "Keep me", body: "Body here" } });
+    await putSettings({ confirmation_email: { subject: "", body: "", button_label: "" } });
+    const ce = (await getSettings()).body.settings.confirmation_email;
+    expect(ce.subject).toBe("Confirm your subscription");
+    expect(ce.button_label).toBe("Confirm subscription");
+    expect(ce.body).toMatch(/confirm your email/i);
+  });
+
+  it("rejects a non-string field with 400", async () => {
+    const res = await putSettings({ confirmation_email: { subject: 42 } });
+    expect(res.status).toBe(400);
+  });
+
+  it("the sent confirmation email reflects the edited copy (subject + body + button)", async () => {
+    await putSettings({
+      confirmation_email: {
+        subject: "Please confirm — Marsh Notes",
+        body: "Tap below to start receiving Marsh Notes.",
+        button_label: "Confirm my email",
+        reassurance: "Not you? Ignore this.",
+      },
+    });
+    const msg = await subscribeAndGetConfirmation();
+    expect(msg?.subject).toBe("Please confirm — Marsh Notes");
+    expect(msg?.html).toContain("Tap below to start receiving Marsh Notes.");
+    expect(msg?.html).toContain("Confirm my email");
+    expect(msg?.html).toContain("Not you? Ignore this.");
+    expect(msg?.text).toContain("Tap below to start receiving Marsh Notes.");
+  });
+
+  it("the sent confirmation email is headed with the publication identity", async () => {
+    // A distinctive name that appears only in the masthead — never in the subject/body.
+    await putSettings({
+      publication: { name: "Heron Digest", tagline: "Wetland field notes" },
+      confirmation_email: {
+        subject: "Confirm please",
+        body: "Tap to finish signing up.",
+        button_label: "Confirm",
+        reassurance: "",
+      },
+    });
+    const msg = await subscribeAndGetConfirmation();
+    expect(msg?.html).toContain("Heron Digest");
+    expect(msg?.html).toContain("Wetland field notes");
+  });
+});
+
+// The masthead renders directly (a pure function of copy + identity), so its
+// degrade-to-plain behavior is unit-tested without the subscribe round-trip.
+describe("confirmation email masthead (SPEC §7)", () => {
+  const link = `${base}/confirm?token=abc123`;
+
+  it("degrades to no masthead when there is no identity, keeping the confirm link", () => {
+    const r = confirmationEmail(link, DEFAULT_CONFIRMATION_EMAIL, {
+      name: "",
+      tagline: "",
+      logoUrl: "",
+    });
+    expect(r.html).not.toContain("<hr");
+    expect(r.html).toContain("Confirm subscription");
+    expect(r.html).toContain(link);
+  });
+
+  it("renders the masthead (name + tagline + rule) when an identity is present", () => {
+    const r = confirmationEmail(link, DEFAULT_CONFIRMATION_EMAIL, {
+      name: "Heron Digest",
+      tagline: "Wetland field notes",
+      logoUrl: "",
+    });
+    expect(r.html).toContain("<hr");
+    expect(r.html).toContain("Heron Digest");
+    expect(r.html).toContain("Wetland field notes");
+  });
+
+  it("ships light+dark support like the newsletter shell", () => {
+    const r = confirmationEmail(link, DEFAULT_CONFIRMATION_EMAIL, {
+      name: "Heron Digest",
+      tagline: "Wetland field notes",
+      logoUrl: "",
+    });
+    // color-scheme opts the email into client dark handling…
+    expect(r.html).toContain('content="light dark"');
+    // …and a dark @media block darkens the frame + ink (it can't be inlined here anyway).
+    expect(r.html).toContain("prefers-color-scheme: dark");
+    expect(r.html).toContain("#ededed"); // ink in dark mode
+    expect(r.html).toContain("#232327"); // card surface in dark mode
+  });
+
+  it("escapes operator copy and identity into the HTML (no injection)", () => {
+    const r = confirmationEmail(
+      link,
+      {
+        subject: "Confirm",
+        body: "<script>alert(1)</script>",
+        button_label: "Go",
+        reassurance: "a <b> c",
+      },
+      { name: '"><img src=x onerror=alert(1)>', tagline: "notes & more", logoUrl: "" },
+    );
+    // Operator copy is escaped as text, not injected as markup.
+    expect(r.html).not.toContain("<script>alert(1)</script>");
+    expect(r.html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(r.html).not.toContain("a <b> c");
+    // The identity name can't break out of the masthead's alt attribute or its <div>.
+    expect(r.html).not.toContain('"><img src=x onerror=alert(1)>');
+    expect(r.html).toContain("notes &amp; more");
+  });
+});
+
+describe("publication logo", () => {
+  it("gates the logo routes like the rest of admin", async () => {
+    const post = await SELF.fetch(`${base}/api/settings/logo`, { method: "POST" });
+    expect(post.status).toBe(401);
+    const del = await SELF.fetch(`${base}/api/settings/logo`, { method: "DELETE" });
+    expect(del.status).toBe(401);
+  });
+
+  it("uploads a logo under a key of its own, serves it hardened, and keeps the bytes when it is removed (I3)", async () => {
+    expect((await putLogo(PNG_1x1, "image/png")).status).toBe(200);
+    const logoUrl = (await getSettings()).body.settings.publication.logo_url;
+    expect(logoUrl).toMatch(/\/media\/branding\/logo\/\d+-[0-9a-f]{8}$/);
+
+    // Served publicly, and hardened so a hostile SVG can't run script on direct nav.
+    const served = await SELF.fetch(logoUrl);
+    expect(served.status).toBe(200);
+    expect(served.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(served.headers.get("content-security-policy")).toBe("sandbox");
+
+    const del = await SELF.fetch(`${base}/api/settings/logo`, {
+      method: "DELETE",
+      headers: AUTH,
+    });
+    expect(del.status).toBe(200);
+    expect((await getSettings()).body.settings.publication.logo_url).toBe("");
+    // Gone from what renders from now on; still there for what was already sent.
+    expect((await SELF.fetch(logoUrl)).status).toBe(200);
+  });
+
+  it("keeps showing a sent email the logo it was sent with, after a new upload and a removal (I3, SPEC §9)", async () => {
+    const logoA = new Uint8Array([...PNG_1x1]);
+    const logoB = new Uint8Array([...PNG_1x1, 0]); // other bytes, so the two can be told apart
+    expect((await putLogo(logoA, "image/png")).status).toBe(200);
+    const send = await dueSend();
+    await tick();
+    const row = await env.DB.prepare("SELECT status, rendered_html FROM sends WHERE id = ?")
+      .bind(send.id)
+      .first<{ status: string; rendered_html: string }>();
+    const sentUrl = /src="([^"]*\/media\/branding\/logo\/\d+-[0-9a-f]{8})"/.exec(
+      row?.rendered_html ?? "",
+    )?.[1];
+    expect(sentUrl).toBeDefined();
+    const bytesAt = async (url: string) =>
+      new Uint8Array(await (await SELF.fetch(url)).arrayBuffer());
+
+    expect((await putLogo(logoB, "image/png")).status).toBe(200);
+    const newUrl = (await getSettings()).body.settings.publication.logo_url;
+    expect(newUrl).not.toBe(sentUrl);
+    expect(await bytesAt(newUrl)).toEqual(logoB); // a new render shows the new logo
+    expect(await bytesAt(sentUrl ?? "")).toEqual(logoA); // the sent copy still shows its own
+
+    await SELF.fetch(`${base}/api/settings/logo`, { method: "DELETE", headers: AUTH });
+    expect(await bytesAt(sentUrl ?? "")).toEqual(logoA);
+  });
+
+  it("reads a stored logo key only in the shape an upload makes, so it can't point the logo at another object", async () => {
+    await setPublicationLogo(env.DB, {
+      version: 7,
+      contentType: "image/png",
+      key: "branding/logo/../posts/p1/photo.png",
+    });
+    expect((await getSettings()).body.settings.publication.logo_url).toMatch(
+      /\/media\/branding\/logo\?v=7$/,
+    );
+  });
+
+  it("serves a logo from before per-upload keys where its sends point, and never writes or deletes that key again", async () => {
+    await env.MEDIA.put(BRANDING_LOGO_KEY, PNG_1x1, { httpMetadata: { contentType: "image/png" } });
+    await setPublicationLogo(env.DB, { version: 7, contentType: "image/png" }); // no key: the old shape
+    expect((await getSettings()).body.settings.publication.logo_url).toMatch(
+      /\/media\/branding\/logo\?v=7$/,
+    );
+    expect((await putLogo(new Uint8Array([...PNG_1x1, 0]), "image/png")).status).toBe(200);
+    await SELF.fetch(`${base}/api/settings/logo`, { method: "DELETE", headers: AUTH });
+    const legacy = await env.MEDIA.get(BRANDING_LOGO_KEY);
+    expect(new Uint8Array(await (legacy as R2ObjectBody).arrayBuffer())).toEqual(
+      new Uint8Array([...PNG_1x1]),
+    );
+  });
+
+  it("refuses anything but a raster image with a 400 naming the formats, SVG included", async () => {
+    for (const type of ["application/pdf", "image/svg+xml"]) {
+      const res = await putLogo(new TextEncoder().encode("<svg onload=alert(1)/>"), type);
+      expect(res.status, type).toBe(400);
+      expect(((await res.json()) as { message: string }).message, type).toMatch(
+        /PNG, JPEG, WebP, or GIF/,
+      );
+    }
+    // Nothing was stored: no logo is set and no bytes were written.
+    expect((await getSettings()).body.settings.publication.logo_url).toBe("");
+    expect(await logoKeys()).toEqual([]);
+    // A PNG still uploads, and so does one whose declared type carries case or parameters.
+    expect((await putLogo(PNG_1x1, "image/png")).status).toBe(200);
+    expect((await putLogo(PNG_1x1, "Image/PNG; x=y")).status).toBe(200);
+  });
+});
+
+describe("two writers on the one settings row", () => {
+  it("both land: neither clobbers the other's field (a CAS with retry, not last-write-wins)", async () => {
+    // Every settings write is a read-merge-write of the whole blob. Three writers in
+    // one isolate interleave at their awaits (each reads before any of them writes),
+    // so without the compare-and-swap on `updated_at` the last write would carry the
+    // first reader's stale copy and silently drop the others' fields.
+    const marker = `race-${crypto.randomUUID().slice(0, 8)}`;
+    await Promise.all([
+      updateSettings(env.DB, { publication: { name: `name-${marker}` } }),
+      updateSettings(env.DB, { publication: { tagline: `tagline-${marker}` } }),
+      setPublicationLogo(env.DB, { version: 42, contentType: "image/png" }),
+    ]);
+    const { body } = await getSettings();
+    expect(body.settings.publication.name).toBe(`name-${marker}`);
+    expect(body.settings.publication.tagline).toBe(`tagline-${marker}`);
+    expect(body.settings.publication.logo_url).toContain("/media/branding/logo?v=42");
+  });
+});
+
+describe("a corrupt settings row", () => {
+  const readRow = () =>
+    env.DB.prepare("SELECT data, updated_at FROM settings WHERE id = 1").first<{
+      data: string;
+      updated_at: number;
+    }>();
+
+  for (const [what, data] of [
+    ["unparseable JSON", '{"publication": {"name": "Birds'],
+    ["JSON that is not an object", "null"],
+  ] as const) {
+    it(`fails the API's reads and writes, keeps the reader pages up, and leaves the row as it is: ${what}`, async () => {
+      allowErrorLogs("settings.corrupt");
+      await putSettings({ publication: { name: "Before" } });
+      await env.DB.prepare("UPDATE settings SET data = ? WHERE id = 1").bind(data).run();
+      await clearLogos();
+      const before = await readRow();
+      const errors = vi.spyOn(console, "error");
+      try {
+        const got = await SELF.fetch(`${base}/api/settings`, { headers: AUTH });
+        expect(got.status).toBe(500);
+        expect(((await got.json()) as { error: string }).error).toBe("settings_corrupt");
+        expect((await putSettings({ publication: { name: "After" } })).status).toBe(500);
+        expect((await putLogo(PNG_1x1, "image/png")).status).toBe(500);
+        // The refused upload stored no bytes: no logo object the row doesn't name.
+        expect(await logoKeys()).toEqual([]);
+        // The reader pages only show the identity, so they stay up on the defaults.
+        for (const path of ["/", "/archive", "/subscribe"]) {
+          const page = await SELF.fetch(`${base}${path}`, { headers: { accept: "text/html" } });
+          expect(page.status, path).toBe(200);
+          expect(await page.text(), path).not.toContain("Before");
+        }
+        // Nothing saved over it: the defaults never reach the row (byte for byte).
+        expect(await readRow()).toEqual(before);
+        expect(logged(errors).some((line) => line.event === "settings.corrupt")).toBe(true);
+      } finally {
+        errors.mockRestore();
+        await env.DB.prepare("UPDATE settings SET data = '{}' WHERE id = 1").run();
+      }
+    });
+  }
+});
+
+describe("the stored settings keep their own shape while the wire is snake_case (docs/API.md)", () => {
+  // A row as 1.12.0 wrote it, before the wire's names changed. Live instances hold rows like
+  // this, so a refactor that moved the blob's keys would lose their template and recipients.
+  const STORED_1_12 = {
+    testRecipients: ["me@example.com"],
+    publication: { name: "Field Notes", tagline: "Birding", address: "1 Marsh Lane", logo: null },
+    emailTemplate:
+      '<div>{{ .Post.Body }}<a href="{{ .Email.UnsubscribeURL }}">Unsubscribe</a> stored</div>',
+    confirmationEmail: {
+      subject: "Please confirm",
+      body: "Tap below.",
+      buttonLabel: "Go",
+      reassurance: "",
+    },
+    notifications: { to: ["me@example.com"] },
+  };
+
+  it("reads a row in the 1.12.0 shape back through GET /api/settings, every field intact", async () => {
+    await env.DB.prepare("INSERT INTO settings (id, data, updated_at) VALUES (1, ?, 1)")
+      .bind(JSON.stringify(STORED_1_12))
+      .run();
+    const { res, body } = await getSettings();
+    expect(res.status).toBe(200);
+    expect(body.settings).toMatchObject({
+      test_recipients: ["me@example.com"],
+      publication: { name: "Field Notes", tagline: "Birding", address: "1 Marsh Lane" },
+      email_template: STORED_1_12.emailTemplate,
+      confirmation_email: {
+        subject: "Please confirm",
+        body: "Tap below.",
+        button_label: "Go",
+        reassurance: "",
+      },
+    });
+  });
+
+  it("writes a save under the stored keys, so a release rolled back still reads it", async () => {
+    const put = await SELF.fetch(`${base}/api/settings`, {
+      method: "PUT",
+      headers: JSON_AUTH,
+      body: JSON.stringify({
+        test_recipients: ["you@example.com"],
+        confirmation_email: { button_label: "Yes" },
+      }),
+    });
+    expect(put.status).toBe(200);
+    const row = await env.DB.prepare("SELECT data FROM settings WHERE id = 1").first<{
+      data: string;
+    }>();
+    const stored = JSON.parse(row?.data ?? "{}");
+    expect([stored.testRecipients, stored.confirmationEmail?.buttonLabel]).toEqual([
+      ["you@example.com"],
+      "Yes",
+    ]);
+    expect(Object.keys(stored)).not.toContain("test_recipients");
+  });
+});

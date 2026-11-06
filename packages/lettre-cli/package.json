@@ -1,0 +1,26 @@
+{
+  "name": "@letretro/lettre-cli",
+  "version": "1.20.0",
+  "type": "module",
+  "description": "The command-line client for Lettre by LetRetro.",
+  "license": "MIT",
+  "homepage": "https://github.com/LetRetroHQ/lettre",
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LetRetroHQ/lettre.git",
+    "directory": "packages/lettre-cli"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "lettre": "bin/lettre.mjs"
+  },
+  "files": [
+    "bin/",
+    "lib/"
+  ]
+}

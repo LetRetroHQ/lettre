@@ -1,0 +1,387 @@
+/**
+ * Freeze + soft-lock (I3, I6). Scheduling makes the email: it renders the post NOW,
+ * with the template and the identity as they stand, stores the bytes on a `sends`
+ * row, and locks the post to draft-edits. Canceling and moving are a CAS that only
+ * succeeds inside the review window, which closes at the fire time (SPEC §6), whether or
+ * not the sweep has started the send. A later template or identity change re-makes the
+ * frozen render in place (remake.ts); a move touches only the fire time.
+ *
+ * Each refusal has a code of its own and carries the send as it stands where there is one
+ * (`window_closed`, `send_canceled`, `post_not_draft`, `active_send_exists`, and the rest).
+ * An action that finds the send already as asked (canceled already, or already at that
+ * time) answers `changed: false` rather than refusing, so a retried request is safe. An
+ * action carries no precondition on the send the caller read: it lands inside the window,
+ * can be undone before the fire time, and its answer shows the send as it now stands (SPEC §1).
+ */
+
+import { tooSoonMessage } from "../../shared/sends";
+import type { Actor } from "../../shared/who_acted";
+import { listImages } from "../db/images";
+import type { PostRow } from "../db/posts";
+import {
+  getCurrentRevision,
+  isSlugCollision,
+  type PublishingInput,
+  publishingChanges,
+  setPostStatusStmt,
+  setPublishingStmt,
+} from "../db/posts";
+import {
+  canceledAt,
+  cancelStmt,
+  type FrozenRender,
+  getActiveSendForPost,
+  getSend,
+  insertScheduledSendStmt,
+  noActiveSendFor,
+  recordActStmt,
+  rescheduledTo,
+  rescheduleStmt,
+  type SendRow,
+  sendExists,
+  settingsVersionIs,
+  stampSendsOfPostStmt,
+} from "../db/sends";
+import { readSettings } from "../db/settings";
+import { audienceCount } from "../db/subscribers";
+import type { AppEnv, Config } from "../env";
+import { badRequest, notFound, refusal } from "../lib/errors";
+import { newId } from "../lib/ids";
+import { log, whoActed } from "../lib/log";
+import { slugRefusal } from "../lib/slug_refusals";
+import { unwrap } from "../lib/unwrap";
+import { render } from "../render/render";
+import { type EmailBranding, resolveBranding } from "../render/template_engine";
+import { sendAsItStands } from "./describe";
+
+/** The one render a freeze performs: the post's current content and images through
+ *  the single render path (I5), inside `branding` (the template plus the identity).
+ *  Shared by the schedule and the re-make, so the two cannot drift on what they render. */
+export async function renderPost(
+  env: AppEnv,
+  config: Config,
+  post: PostRow,
+  branding: EmailBranding,
+): Promise<FrozenRender> {
+  const revision = await getCurrentRevision(env.DB, post);
+  // Not a refusal a client meets: every post is created with its first revision, so only a
+  // row written outside the API has none. An empty body has a revision and is rendered,
+  // warned about rather than blocked (SPEC §6), so a post's `actions` need not predict this.
+  if (!revision) {
+    throw badRequest("This post has no content yet. Write something, then schedule it.");
+  }
+  const images = await listImages(env.DB, post.id);
+  const rendered = await render({ post, revision, images }, config, branding);
+  return {
+    rendered_html: rendered.html,
+    rendered_text: rendered.text,
+    subject: rendered.subject,
+    warnings: rendered.warnings,
+  };
+}
+
+/** The sweep's cadence: it runs once a minute, on the minute (SPEC §6, the timer). */
+const MINUTE_MS = 60 * 1000;
+
+/**
+ * A requested fire time as the send will carry it: rounded up to the next whole minute, and
+ * left as it is when already on one. The sweep fires a send at the first tick at or after its
+ * fire time, and ticks fall on the minute, so a time with seconds in it would fire at the
+ * next minute anyway; carrying that minute means the countdown every client shows ends when
+ * the send actually starts, rather than up to a minute before (SPEC §6). Rounding only ever
+ * moves the time later, so it lengthens the review window and never shortens it (I6).
+ */
+export function onTheMinute(fireAt: number): number {
+  return Math.ceil(fireAt / MINUTE_MS) * MINUTE_MS;
+}
+
+/**
+ * The one gate every requested fire time passes, for schedule, Send now, and reschedule
+ * alike, from either client: refuse a time inside the deployment's minimum lead
+ * (`fire_at_too_soon`), and answer the time to store, on the minute (`onTheMinute`). The lead
+ * is checked on the time as requested, before rounding, so rounding can only add to a window
+ * that was already long enough (I6). `now` is the caller's own reading of the clock when it
+ * has one (Send now asks for exactly `now` plus the lead, which a later reading would refuse).
+ */
+export function acceptFireAt(
+  requested: number,
+  minLeadMs: number,
+  { now = Date.now() }: { now?: number } = {},
+): number {
+  if (requested < now + minLeadMs) {
+    throw refusal("fire_at_too_soon", tooSoonMessage(minLeadMs), {
+      field: "fire_at",
+    });
+  }
+  return onTheMinute(requested);
+}
+
+/** How many times a freeze re-reads and re-renders when the settings changed under it.
+ *  A template save landing in that gap is rare; a couple of retries settles it. */
+const FREEZE_RETRIES = 3;
+
+/** The refusal for a post that already has its one active send (SPEC §6). */
+const ACTIVE_SEND_EXISTS =
+  "This post already has a send scheduled or going out. Edit its schedule or cancel it instead.";
+
+/** Create a scheduled Send from the post's current content and lock the post. `postSettings`, when
+ *  given, sets the post's listing and slug in the same batch (SPEC §4, §5), already resolved
+ *  by the caller: they are not part of the render, so they land beside the lock rather than in
+ *  the frozen copy, and a refused freeze changes neither. `recorded` is the act this freeze is, a
+ *  schedule or Send now, and who took it, which the same batch adds to the send's log of acts
+ *  (SPEC §6, §11); null records none, as a fixture does. */
+export async function freeze(
+  env: AppEnv,
+  config: Config,
+  post: PostRow,
+  fireAt: number,
+  postSettings: PublishingInput = {},
+  recorded: { act: "schedule" | "send_now"; by: Actor } | null = null,
+): Promise<SendRow> {
+  const active = await getActiveSendForPost(env.DB, post.id);
+  if (active) {
+    throw await activeSendExists(env, active);
+  }
+  if (post.status !== "draft") {
+    throw refusal(
+      "post_not_draft",
+      post.status === "sent"
+        ? "This post has already been sent, so it can’t be scheduled again."
+        : "This post is already scheduled. Edit its schedule or cancel it instead.",
+    );
+  }
+  // The subject is the one field the reader sees in their inbox (SPEC §6). One
+  // check here covers both Schedule and Send-now and both clients (editor + API);
+  // whitespace-only counts as empty.
+  if (!post.subject.trim()) {
+    throw refusal("subject_required", "Add a subject before you schedule or send this post.", {
+      field: "subject",
+    });
+  }
+
+  for (let attempt = 0; attempt < FREEZE_RETRIES; attempt++) {
+    // Render with the settings as they stand, and remember which: the insert below
+    // lands only while the settings row is still at this version. A template or
+    // identity save that commits in between (a re-make of every scheduled send, SPEC
+    // §9) would otherwise leave this new send on the older look, unlisted; instead
+    // the insert changes zero rows and the freeze renders again with the new settings.
+    const { settings, version } = await readSettings(env.DB);
+    const rendered = await renderPost(env, config, post, resolveBranding(settings, config));
+    const audience = await audienceCount(env.DB);
+
+    const now = Date.now();
+    const id = newId();
+    const settingsVersion = version ?? 0;
+    // The post's settings land only with the lock, under the same settings guard, and stamp
+    // the post's earlier sends, whose views carry them too (SPEC §8).
+    const listing = publishingChanges(post, postSettings)
+      ? [
+          setPublishingStmt(env.DB, post, postSettings, settingsVersionIs(settingsVersion)),
+          stampSendsOfPostStmt(env.DB, post.id),
+        ]
+      : [];
+    let results: D1Result[];
+    try {
+      results = await env.DB.batch([
+        insertScheduledSendStmt(
+          env.DB,
+          { ...rendered, id, post_id: post.id, fire_at: fireAt, recipient_count: audience },
+          now,
+          settingsVersion,
+        ),
+        setPostStatusStmt(
+          env.DB,
+          post.id,
+          "draft",
+          "scheduled",
+          now,
+          settingsVersionIs(settingsVersion),
+        ),
+        ...listing,
+        ...(recorded
+          ? [
+              recordActStmt(
+                env.DB,
+                { sendId: id, act: recorded.act, at: now, by: recorded.by, fireAt },
+                sendExists(id),
+              ),
+            ]
+          : []),
+      ]);
+    } catch (err) {
+      // The pre-check above is UX, not the guarantee: a concurrent freeze() for the
+      // same post can pass it and reach here. The partial unique index (`idx_sends_one_active_per_post`)
+      // is the real backstop — it fails the loser's insert, which we map to the same
+      // friendly conflict so the DB, not check-then-act, enforces one active send (I4, I6).
+      // Another post took the slug between the caller's check and this batch.
+      if (isSlugCollision(err)) {
+        throw slugRefusal("slug_taken");
+      }
+      if (isActiveSendConflict(err)) {
+        const winner = await getActiveSendForPost(env.DB, post.id);
+        throw winner
+          ? await activeSendExists(env, winner)
+          : refusal("active_send_exists", ACTIVE_SEND_EXISTS);
+      }
+      throw err;
+    }
+    if ((results[0]?.meta.changes ?? 0) > 0) {
+      log.info("send.scheduled", {
+        sendId: id,
+        postId: post.id,
+        fireAt: new Date(fireAt).toISOString(),
+        act: recorded?.act,
+        ...(recorded ? whoActed(recorded.by) : {}),
+      });
+      return unwrap(await getSend(env.DB, id), "send");
+    }
+  }
+  throw refusal(
+    "settings_changed",
+    "The template or the publication’s details changed while this was being scheduled. Try again.",
+  );
+}
+
+/** The refusal for a post that already has its one active send, carrying that send. */
+export async function activeSendExists(env: AppEnv, send: Pick<SendRow, "id">) {
+  return refusal("active_send_exists", ACTIVE_SEND_EXISTS, {
+    ...(await sendAsItStands(env, send.id)),
+  });
+}
+
+/** True for the D1/SQLite violation of the "one active send per post" partial unique index. */
+function isActiveSendConflict(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /UNIQUE constraint failed:\s*sends\.post_id/i.test(message);
+}
+
+/** An action's answer: the send as it now stands, and whether the action wrote anything. */
+export interface ActionResult {
+  send: SendRow;
+  changed: boolean;
+}
+
+/** Read the send, 404 if it is gone. */
+async function readForAction(env: AppEnv, sendId: string): Promise<SendRow> {
+  const send = await getSend(env.DB, sendId);
+  if (!send) {
+    throw notFound("send");
+  }
+  return send;
+}
+
+/** The refusal for an action on a send past its review window: due, sending, or sent. */
+async function windowClosed(env: AppEnv, send: SendRow, what: string) {
+  const why =
+    send.status === "scheduled"
+      ? "its fire time has passed and it’s about to send"
+      : `it’s ${send.status}`;
+  return refusal("window_closed", `This send can no longer be ${what}: ${why}.`, {
+    ...(await sendAsItStands(env, send.id)),
+  });
+}
+
+/**
+ * Move a scheduled Send's fire time without re-freezing (I3) or resetting the review
+ * window (I6). Distinct from the cancel → edit → schedule-again path (which is for
+ * *content* changes): this touches only `fire_at`, so the frozen render is untouched (the
+ * audience is resolved when the send fires, not here) and it stays the post's single
+ * active send throughout — only the moment it fires changes. A CAS on the review window
+ * is the guarantee: a send whose fire time has passed (or is sending, sent, or canceled)
+ * cannot be moved, even if it changes between the read and the update. The reverse race
+ * — the sweep firing a send this call just moved forward — is closed on the sweep side,
+ * where `acquireLease` re-checks `fire_at` before leasing a `scheduled` send.
+ *
+ * A move to the time the send already has (on the minute, as it is stored) changes nothing
+ * and answers `changed: false` before the minimum lead is checked, so a retried move is safe;
+ * any other time passes `acceptFireAt`: at least `minLeadMs` out, stored on the minute. With
+ * `by`, a move that lands adds itself to the send's log of acts (SPEC §6, §11), in the same
+ * batch; one that changes nothing records no act.
+ */
+export async function reschedule(
+  env: AppEnv,
+  sendId: string,
+  fireAt: number,
+  minLeadMs: number,
+  by: Actor | null = null,
+): Promise<ActionResult> {
+  const send = await readForAction(env, sendId);
+  const now = Date.now();
+  if (send.status === "canceled") {
+    throw refusal("send_canceled", "This send was canceled. Schedule the post again instead.", {
+      ...(await sendAsItStands(env, send.id)),
+    });
+  }
+  if (send.status !== "scheduled" || send.fire_at <= now) {
+    throw await windowClosed(env, send, "rescheduled");
+  }
+  // Compared on the minute it would be stored at, so a retried move is recognized
+  // whatever seconds the caller put on the time.
+  if (send.fire_at === onTheMinute(fireAt)) {
+    return { send, changed: false };
+  }
+  const target = acceptFireAt(fireAt, minLeadMs, { now });
+  const [res] = await env.DB.batch([
+    rescheduleStmt(env.DB, sendId, target, now),
+    ...(by
+      ? [
+          recordActStmt(
+            env.DB,
+            { sendId, act: "reschedule", at: now, by, fireAt: target },
+            rescheduledTo(sendId, target),
+          ),
+        ]
+      : []),
+  ]);
+  if ((res?.meta.changes ?? 0) === 0) {
+    // It changed between the read and the write: answer for what it is now.
+    return reschedule(env, sendId, fireAt, minLeadMs, by);
+  }
+  log.info("send.rescheduled", {
+    sendId,
+    postId: send.post_id,
+    fireAt: new Date(target).toISOString(),
+    movedMs: target - send.fire_at,
+    ...(by ? whoActed(by) : {}),
+  });
+  return { send: unwrap(await getSend(env.DB, sendId), "send"), changed: true };
+}
+
+/** Cancel a pending Send and unlock its post, in one batch so the two land together:
+ *  a post left `scheduled` with no active send would be locked out of the editor.
+ *  Only inside the review window; a send canceled already answers `changed: false` and records
+ *  no act. With `by`, a cancel that lands adds itself to the send's log of acts (SPEC §6, §11). */
+export async function cancel(
+  env: AppEnv,
+  sendId: string,
+  by: Actor | null = null,
+): Promise<ActionResult> {
+  const send = await readForAction(env, sendId);
+  if (send.status === "canceled") {
+    return { send, changed: false };
+  }
+  const now = Date.now();
+  if (send.status !== "scheduled" || send.fire_at <= now) {
+    throw await windowClosed(env, send, "canceled");
+  }
+  const [res] = await env.DB.batch([
+    cancelStmt(env.DB, sendId, now),
+    setPostStatusStmt(
+      env.DB,
+      send.post_id,
+      "scheduled",
+      "draft",
+      now,
+      noActiveSendFor(send.post_id),
+    ),
+    ...(by
+      ? [recordActStmt(env.DB, { sendId, act: "cancel", at: now, by }, canceledAt(sendId, now))]
+      : []),
+  ]);
+  if ((res?.meta.changes ?? 0) === 0) {
+    // It changed between the read and the write: answer for what it is now.
+    return cancel(env, sendId, by);
+  }
+  log.info("send.canceled", { sendId, postId: send.post_id, ...(by ? whoActed(by) : {}) });
+  return { send: unwrap(await getSend(env.DB, sendId), "send"), changed: true };
+}

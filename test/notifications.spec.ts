@@ -1,0 +1,1472 @@
+import { SELF } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
+import { dashboardRouteFromSearch } from "../shared/dashboard_link";
+import { refusalAdvice } from "../shared/sends";
+import { MAX_NOTIFY_ADDRESSES, type SendNotificationKind } from "../shared/settings";
+import * as notifications from "../src/db/notifications";
+import * as posts from "../src/db/posts";
+import * as sending from "../src/db/sending";
+import * as sends from "../src/db/sends";
+import { updateSettings } from "../src/db/settings";
+import type { AppEnv } from "../src/env";
+import { getConfig } from "../src/env";
+import { MAX_NOTIFY_ATTEMPTS, MISSED_THRESHOLD_MS, STUCK_THRESHOLD_MS } from "../src/lib/time";
+import * as channel from "../src/notify/channel";
+import { CloudflareNotifier, ProviderNotifier } from "../src/notify/channel";
+import { composeNotification, sendLink } from "../src/notify/compose";
+import { clearFakeNotifications, failFakeNotify, fakeNotifications } from "../src/notify/fake";
+import { NOTIFY_RESERVE, notifyPublisher, stillHolds } from "../src/notify/notify";
+import * as providers from "../src/providers";
+import { Budget } from "../src/send/budget";
+import { sweep } from "../src/send/sweep";
+import { Contacts } from "../src/services/sending";
+import { BatchProvider } from "./support/batching";
+import { guardD1 } from "./support/d1_guard";
+import { SES_DEPLOY } from "./support/deploy";
+import {
+  addresses,
+  dueSend,
+  frozenSend,
+  resetDatabase,
+  seedConfirmed,
+  sendingWorks,
+  tick,
+  ticks,
+} from "./support/fixtures";
+import { AUTH, base, JSON_AUTH } from "./support/http";
+import { allowErrorLogs, logged } from "./support/log";
+import { fetchWith } from "./support/worker_env";
+
+// The publisher is told, by email, when a send goes out or runs into a problem (SPEC §8): once per
+// event, however many ticks the condition lasts, through a channel that is the fake here
+// (the test env is dev-shaped), and never at a cost to any send (I1 to I6).
+
+const PUBLISHER = "publisher@example.com";
+
+async function rows(sendId?: string) {
+  const { results } = await env.DB.prepare(
+    "SELECT send_id, kind, episode, status, attempts, error FROM notifications WHERE ? IS NULL OR send_id = ? ORDER BY created_at, kind",
+  )
+    .bind(sendId ?? null, sendId ?? null)
+    .all<{
+      send_id: string;
+      kind: string;
+      episode: number;
+      status: string;
+      attempts: number;
+      error: string | null;
+    }>();
+  return results;
+}
+
+let transport: BatchProvider;
+let errors: MockInstance;
+let warnings: MockInstance;
+
+beforeEach(async () => {
+  await resetDatabase();
+  await sendingWorks();
+  await updateSettings(env.DB, { notifications: { to: [PUBLISHER] } });
+  clearFakeNotifications();
+  // Only Date is faked, so `ticks` can move the clock past a halt's backoff.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  transport = new BatchProvider();
+  vi.spyOn(providers, "getProvider").mockReturnValue(transport);
+  errors = vi.spyOn(console, "error");
+  warnings = vi.spyOn(console, "warn");
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+describe("a send finishing", () => {
+  it("tells the publisher once, in a sentence with a link to the send report", async () => {
+    await seedConfirmed(addresses(3));
+    const send = await dueSend({ subject: "Owls in winter" });
+
+    await ticks(4);
+
+    expect((await sends.getSend(env.DB, send.id))!.status).toBe("sent");
+    const sent = fakeNotifications();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.to).toBe(PUBLISHER);
+    expect(sent[0]!.subject).toBe("Sent: Owls in winter");
+    expect(sent[0]!.text).toContain("Your email provider accepted all 3 emails.");
+    expect(sent[0]!.text).toContain("See the send report: ");
+    expect(sent[0]!.text).toContain("Settings → Notifications");
+    // In the query, not the hash, so an Access login in between keeps it.
+    expect(sent[0]!.text).toContain(`/dashboard/?to=/sent/${send.id}`);
+    expect(await rows(send.id)).toMatchObject([{ kind: "finished", status: "sent", attempts: 1 }]);
+    // Nothing about it reached the list: the subscribers were mailed once each, the
+    // publisher not at all through the newsletter's provider.
+    expect(transport.mailed).toHaveLength(3);
+  });
+
+  it("with no address set, records the event as having nowhere to go and never mails a backlog", async () => {
+    await updateSettings(env.DB, { notifications: { to: [] } });
+    await seedConfirmed(addresses(2));
+    const send = await dueSend();
+
+    await ticks(2);
+    expect(fakeNotifications()).toHaveLength(0);
+    expect(await rows(send.id)).toMatchObject([{ kind: "finished", status: "unaddressed" }]);
+
+    await updateSettings(env.DB, { notifications: { to: [PUBLISHER] } });
+    await ticks(2);
+    expect(fakeNotifications()).toHaveLength(0);
+  });
+
+  it("does not mail the history: a send that finished before the horizon is not news", async () => {
+    await seedConfirmed(addresses(1));
+    const send = await dueSend();
+    await ticks(2);
+    await env.DB.prepare("DELETE FROM notifications").run();
+    await env.DB.prepare("UPDATE sends SET completed_at = ? WHERE id = ?")
+      .bind(Date.now() - 2 * 24 * 60 * 60 * 1000, send.id)
+      .run();
+    clearFakeNotifications();
+
+    await ticks(1);
+    expect(fakeNotifications()).toHaveLength(0);
+  });
+});
+
+describe("a send that needs the publisher", () => {
+  it("the provider refusing the account: told within two ticks with its words and the advice, once however long it lasts", async () => {
+    allowErrorLogs("send.stuck");
+    await seedConfirmed(addresses(5));
+    const send = await dueSend({ subject: "Owls in winter" });
+    transport.refuse =
+      "ses 403 UnrecognizedClientException: The security token included in the request is invalid";
+
+    await ticks(2);
+    const [refused] = fakeNotifications();
+    expect(refused!.subject).toBe('Email isn’t going out, and "Owls in winter" is waiting');
+    expect(refused!.text).toContain("security token included in the request is invalid");
+    expect(refused!.text).toContain(refusalAdvice("credentials"));
+    expect(refused!.text).toContain("No one has been marked unsent because of this");
+    expect(await rows(send.id)).toEqual([]);
+
+    await ticks(5);
+    expect(fakeNotifications()).toHaveLength(1);
+
+    // Fixed: the send resumes on its own and finishing is a notification of its own.
+    transport.refuse = null;
+    await ticks(3);
+    expect((await sends.getSend(env.DB, send.id))!.status).toBe("sent");
+    expect(fakeNotifications().map((n) => n.subject)).toEqual([
+      'Email isn’t going out, and "Owls in winter" is waiting',
+      "Sent: Owls in winter",
+    ]);
+  });
+
+  it("a refusal short of an outage that lifts and returns is a new event", async () => {
+    /** Answers one batch once `relapse` is set, then refuses again for that reason: the
+     *  quota freed long enough for a batch to land, then used up once more. */
+    class Relapsing extends BatchProvider {
+      relapse: string | null = null;
+      override async sendBatch(
+        ...args: Parameters<BatchProvider["sendBatch"]>
+      ): ReturnType<BatchProvider["sendBatch"]> {
+        const result = await super.sendBatch(...args);
+        if (result.kind === "answered" && this.relapse) {
+          this.refuse = this.relapse;
+          this.relapse = null;
+        }
+        return result;
+      }
+    }
+    const relapsing = new Relapsing();
+    relapsing.refuseCause = "quota";
+    vi.spyOn(providers, "getProvider").mockReturnValue(relapsing);
+    // More than one batch, so the send is still going when the refusal returns.
+    await seedConfirmed(addresses(3 * relapsing.maxBatch));
+    const send = await dueSend({ subject: "Owls in winter" });
+    relapsing.refuse = "ses 429 LimitExceededException: Daily message quota exceeded.";
+
+    await ticks(2);
+    const first = (await sends.getSend(env.DB, send.id))!.halted_at;
+    expect(first).not.toBeNull();
+    expect(relapsing.mailed).toHaveLength(0);
+
+    // The quota frees: a batch is answered, which lifts the refusal, and the next is refused.
+    relapsing.refuse = null;
+    relapsing.relapse = "ses 429 LimitExceededException: Daily message quota exceeded.";
+    await ticks(1);
+    expect(relapsing.mailed).toHaveLength(relapsing.maxBatch);
+    const second = (await sends.getSend(env.DB, send.id))!.halted_at;
+    expect(second).toBeGreaterThan(first!);
+
+    expect((await rows(send.id)).map((r) => [r.kind, r.episode])).toEqual([
+      ["refused", first],
+      ["refused", second],
+    ]);
+    expect(fakeNotifications().map((n) => n.subject)).toEqual([
+      '"Owls in winter" is waiting: SES’s daily quota is used up',
+      '"Owls in winter" is waiting: SES’s daily quota is used up',
+    ]);
+  });
+
+  it("a send in flight past the threshold: told once, and not while a refusal already says why", async () => {
+    await seedConfirmed(addresses(1));
+    const slow = await dueSend({ subject: "Slow one" });
+    const refused = await dueSend({ subject: "Refused one" });
+    const long = Date.now() - STUCK_THRESHOLD_MS - 60_000;
+    await env.DB.prepare(
+      "UPDATE sends SET status = 'sending', started_at = ?, c_pending = 1 WHERE id IN (?, ?)",
+    )
+      .bind(long, slow.id, refused.id)
+      .run();
+    await env.DB.prepare(
+      "UPDATE sends SET halt_reason = 'account', halted_at = ?, halt_error = 'suspended', halt_retry_at = ? WHERE id = ?",
+    )
+      .bind(long, Date.now() + 5 * 60_000, refused.id)
+      .run();
+
+    await notifications.recordNotifications(env.DB, Date.now());
+    await notifications.recordNotifications(env.DB, Date.now());
+
+    expect((await rows(slow.id)).map((r) => r.kind)).toEqual(["stuck"]);
+    expect((await rows(refused.id)).map((r) => r.kind)).toEqual(["refused"]);
+  });
+
+  it("a wedged send awaiting Resolve: told once, naming how many recipients are unknown", async () => {
+    await seedConfirmed(addresses(1));
+    const send = await dueSend({ subject: "Wedged one" });
+    await env.DB.prepare(
+      "UPDATE sends SET status = 'sending', started_at = ?, c_pending = 0, c_in_flight = 4, locked_until = NULL WHERE id = ?",
+    )
+      .bind(Date.now(), send.id)
+      .run();
+
+    await notifications.recordNotifications(env.DB, Date.now());
+    await notifications.recordNotifications(env.DB, Date.now());
+    expect((await rows(send.id)).map((r) => r.kind)).toEqual(["wedged"]);
+
+    // A run still holding the lease is finishing its last batch, not wedged.
+    const held = await dueSend({ subject: "Held one" });
+    await env.DB.prepare(
+      "UPDATE sends SET status = 'sending', started_at = ?, c_pending = 0, c_in_flight = 4, locked_until = ? WHERE id = ?",
+    )
+      .bind(Date.now(), Date.now() + 60_000, held.id)
+      .run();
+    await notifications.recordNotifications(env.DB, Date.now());
+    expect(await rows(held.id)).toEqual([]);
+  });
+
+  it("a late send: told in its Sent email alone, and one still not out told once as missed", async () => {
+    allowErrorLogs("send.missed");
+    await seedConfirmed(addresses(2));
+    const late = await frozenSend(Date.now() - MISSED_THRESHOLD_MS - 5 * 60_000, {
+      subject: "Late one",
+    });
+
+    await ticks(3);
+    const sent = fakeNotifications();
+    expect(sent.map((n) => n.subject)).toEqual(["Sent: Late one"]);
+    expect(sent[0]!.text).toContain("minutes late");
+    expect((await rows(late.id)).map((r) => r.kind)).toEqual(["finished"]);
+
+    // One the sweep cannot fire stays scheduled, and is reported as not gone out.
+    const stranded = await frozenSend(Date.now() - MISSED_THRESHOLD_MS - 60_000, {
+      subject: "Stranded",
+    });
+    await notifications.recordNotifications(env.DB, Date.now());
+    expect((await rows(stranded.id)).map((r) => r.kind)).toEqual(["missed"]);
+  });
+
+  it("a finished send no one accepted is a problem, and one with no one left to send to is not", async () => {
+    const config = getConfig(env);
+    const finished = {
+      send_id: "s1",
+      kind: "finished",
+      episode: 0,
+      attempts: 0,
+      sent_to: [],
+      subject: "Owls",
+      send_status: "sent",
+      fire_at: 0,
+      started_at: 0,
+      completed_at: 60_000,
+      locked_until: null,
+      halt_reason: null,
+      halted_at: null,
+      halt_retry_at: null,
+      progress_at: null,
+      halt_cause: null,
+      halt_error: null,
+      c_pending: 0,
+      c_in_flight: 0,
+      c_accepted: 0,
+      c_delivered: 0,
+      c_bounced: 0,
+      c_complained: 0,
+      c_skipped: 0,
+      c_unsent: 0,
+      receipt_since: 0,
+    } satisfies notifications.DueNotification;
+
+    const none = composeNotification({ ...finished, c_unsent: 30 }, config);
+    expect(none.subject).toBe('"Owls" didn’t reach anyone');
+    expect(none.text).toContain("A finished post can’t be sent again.");
+
+    const left = composeNotification({ ...finished, c_skipped: 4 }, config);
+    expect(left.subject).toBe("Sent: Owls");
+    expect(left.text).toContain("no one left to send to");
+
+    const some = composeNotification(
+      { ...finished, c_accepted: 1_200, c_unsent: 30, c_skipped: 10 },
+      config,
+    );
+    expect(some.text).toContain(
+      "accepted 1,200 of 1,230 emails. The send report shows why the other 30 weren’t sent.",
+    );
+  });
+
+  it("a send on time is not late", async () => {
+    await seedConfirmed(addresses(1));
+    const send = await dueSend();
+    await ticks(2);
+    expect((await rows(send.id)).map((r) => r.kind)).toEqual(["finished"]);
+  });
+});
+
+describe("a signup the SES sandbox refuses", () => {
+  /** A provider in the SES sandbox: it refuses every confirmation, naming the reader. */
+  function sandboxed() {
+    transport.sendBatch = async (_r, recipients) => ({
+      kind: "halted",
+      halt: {
+        reason: "account",
+        cause: "sandbox",
+        error: `ses 400 MessageRejected: Email address is not verified. The following identities failed the check in region US-EAST-1: ${recipients[0]!.email}`,
+      },
+    });
+  }
+  const signUp = (email: string) =>
+    fetchWith({}, "/subscribe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+
+  it("tells the publisher at most once a day, naming no reader, since the reader is told a link is coming (SPEC §7, §8)", async () => {
+    sandboxed();
+    await signUp("ada@example.com");
+    await signUp("bo@example.com");
+    await tick();
+
+    const sent = fakeNotifications();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.subject).toBe("A reader couldn’t sign up: SES is still in the sandbox");
+    expect(sent[0]!.text).toContain("Request production access");
+    expect(sent[0]!.text).not.toContain("ada@example.com");
+    expect(sent[0]!.text).toContain("Open the dashboard: ");
+
+    // The next UTC day's first refusal is told again.
+    vi.setSystemTime(notifications.utcDayStart(Date.now()) + 86_400_000 + 1_000);
+    await signUp("cy@example.com");
+    await tick();
+    expect(fakeNotifications()).toHaveLength(2);
+  });
+
+  it("tells nothing for a confirmation refused for a reason that clears on its own", async () => {
+    transport.sendBatch = async () => ({
+      kind: "halted",
+      halt: {
+        reason: "account",
+        cause: "quota",
+        error: "ses 429 TooManyRequestsException: Daily message quota exceeded.",
+      },
+    });
+    await signUp("ada@example.com");
+    await tick();
+    expect(fakeNotifications()).toHaveLength(0);
+  });
+});
+
+describe("email not going out (SPEC §8)", () => {
+  const signUp = (email: string) =>
+    fetchWith({}, "/subscribe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+
+  const found = (at: number) =>
+    sending.recordRefusal(
+      env.DB,
+      { cause: "credentials", foundBy: "account_check", error: "bad key" },
+      at,
+      true,
+    );
+
+  it("tells the publisher once an outage when a reader's confirmation is refused for the account, with the provider's words and the fix", async () => {
+    transport.refuse = "ses 403 UnrecognizedClientException: bad key";
+    await signUp("ada@example.com");
+    // Signups are paused now, so a second reader is refused before anything is sent.
+    await signUp("bo@example.com");
+    await tick();
+
+    const sent = fakeNotifications();
+    expect(sent.map((n) => n.subject)).toEqual(["Email isn’t going out, and signups are paused"]);
+    expect(sent[0]!.text).toContain("bad key");
+    expect(sent[0]!.text).toContain(refusalAdvice("credentials"));
+    expect(sent[0]!.text).not.toContain("ada@example.com");
+
+    // Still refusing days later, found again: the same outage, not told again.
+    vi.setSystemTime(Date.now() + 3 * 86_400_000);
+    await found(Date.now());
+    await tick();
+    expect(fakeNotifications()).toHaveLength(1);
+  });
+
+  it("a refusal that lifts and returns is a new outage, told again", async () => {
+    await found(Date.now());
+    await tick();
+    vi.setSystemTime(Date.now() + 60_000);
+    await sending.recordAccepted(env.DB, "test", Date.now());
+    vi.setSystemTime(Date.now() + 60_000);
+    await found(Date.now());
+    await tick();
+    expect(fakeNotifications()).toHaveLength(2);
+  });
+
+  /** A send the outage holds, halted `at`, as the sweep leaves one. */
+  async function held(subject: string, at: number) {
+    const send = await frozenSend(at - 60_000, { subject });
+    await env.DB.prepare(
+      `UPDATE sends SET status = 'sending', started_at = ?1, progress_at = ?1, c_pending = 4,
+         halt_reason = 'account', halt_cause = 'credentials', halt_error = 'bad key',
+         halted_at = ?1, halt_retries = 1, halt_retry_at = ?2 WHERE id = ?3`,
+    )
+      .bind(at, at + 60 * 60_000, send.id)
+      .run();
+    return send;
+  }
+
+  it("tells once more when a post is first held after a notice that named none, and never a third time", async () => {
+    await found(Date.now());
+    await notifyPublisher(env, new Budget(50));
+    vi.setSystemTime(Date.now() + 60_000);
+    await held("Later one", Date.now());
+    await notifyPublisher(env, new Budget(50));
+    expect(fakeNotifications().map((n) => n.subject)).toEqual([
+      "Email isn’t going out, and signups are paused",
+      'Email isn’t going out, and "Later one" is waiting',
+    ]);
+
+    vi.setSystemTime(Date.now() + 60_000);
+    await held("Another one", Date.now());
+    await found(Date.now());
+    await notifyPublisher(env, new Budget(50));
+    expect(fakeNotifications()).toHaveLength(2);
+  });
+
+  it("through the sweep: a post the provider holds after the first notice gets the one more, and one joining it none", async () => {
+    await seedConfirmed(addresses(2));
+    await found(Date.now());
+    await tick();
+    expect(fakeNotifications().map((n) => n.subject)).toEqual([
+      "Email isn’t going out, and signups are paused",
+    ]);
+
+    vi.setSystemTime(Date.now() + 60_000);
+    transport.refuse = "ses 403 UnrecognizedClientException: bad key";
+    const first = await dueSend({ subject: "First post" });
+    await tick();
+    expect((await sends.getSend(env.DB, first.id))!.halt_reason).toBe("account");
+    expect(fakeNotifications().map((n) => n.subject)).toEqual([
+      "Email isn’t going out, and signups are paused",
+      'Email isn’t going out, and "First post" is waiting',
+    ]);
+
+    vi.setSystemTime(Date.now() + 60_000);
+    const second = await dueSend({ subject: "Second post" });
+    await tick();
+    expect((await sends.getSend(env.DB, second.id))!.halt_reason).toBe("account");
+    expect(fakeNotifications()).toHaveLength(2);
+  });
+
+  it("a post held while the first notice kept failing is still named, in the one more", async () => {
+    await found(Date.now());
+    failFakeNotify(MAX_NOTIFY_ATTEMPTS);
+    await notifyPublisher(env, new Budget(50));
+    vi.setSystemTime(Date.now() + 60_000);
+    await held("During the retries", Date.now());
+    for (let i = 1; i < MAX_NOTIFY_ATTEMPTS; i++) {
+      vi.setSystemTime(Date.now() + 60_000);
+      await notifyPublisher(env, new Budget(50));
+    }
+    expect(fakeNotifications()).toHaveLength(0);
+    expect(await rows()).toMatchObject([{ kind: "not_sending", status: "failed" }]);
+
+    vi.setSystemTime(Date.now() + 60_000);
+    await notifyPublisher(env, new Budget(50));
+    expect(fakeNotifications().map((n) => n.subject)).toEqual([
+      'Email isn’t going out, and "During the retries" is waiting',
+    ]);
+  });
+
+  it("a further notice whose post stopped being held leaves room for a later post", async () => {
+    await found(Date.now());
+    await notifyPublisher(env, new Budget(50));
+    vi.setSystemTime(Date.now() + 60_000);
+    const gone = await held("Gone", Date.now());
+    await notifications.recordNotifications(env.DB, Date.now());
+    await env.DB.prepare("UPDATE sends SET halt_reason = NULL, halt_cause = NULL WHERE id = ?")
+      .bind(gone.id)
+      .run();
+    await notifyPublisher(env, new Budget(50));
+    expect(fakeNotifications()).toHaveLength(1);
+
+    vi.setSystemTime(Date.now() + 60_000);
+    await held("Later", Date.now());
+    await notifyPublisher(env, new Budget(50));
+    expect(fakeNotifications().map((n) => n.subject)).toEqual([
+      "Email isn’t going out, and signups are paused",
+      'Email isn’t going out, and "Later" is waiting',
+    ]);
+  });
+
+  it("names a post held before its notice goes, and sends no second for it", async () => {
+    await held("First one", Date.now());
+    await found(Date.now());
+    await notifyPublisher(env, new Budget(50));
+    vi.setSystemTime(Date.now() + 60_000);
+    await notifyPublisher(env, new Budget(50));
+    expect(fakeNotifications().map((n) => n.subject)).toEqual([
+      'Email isn’t going out, and "First one" is waiting',
+    ]);
+  });
+
+  it("names every post it holds in one email", async () => {
+    await held("One", Date.now());
+    await held("Two", Date.now());
+    await found(Date.now());
+    await notifyPublisher(env, new Budget(50));
+    const sent = fakeNotifications();
+    expect(sent.map((n) => n.subject)).toEqual(["Email isn’t going out, and 2 posts are waiting"]);
+    expect(sent[0]!.text).toMatch(/"(One|Two)" and "(One|Two)" are waiting/);
+    expect(sent[0]!.text).toContain("they carry on by themselves within the hour");
+  });
+
+  it("closes the notice unsent when an email went through before it was told", async () => {
+    await sending.recordRefusal(
+      env.DB,
+      { cause: "configuration", foundBy: "account_check", error: "no such set" },
+      Date.now(),
+      true,
+    );
+    await sending.recordAccepted(env.DB, "test", Date.now());
+    await tick();
+    expect(fakeNotifications()).toHaveLength(0);
+    expect(await rows()).toMatchObject([{ kind: "not_sending", status: "cleared" }]);
+  });
+});
+
+describe("isolation", () => {
+  it("a channel that fails leaves the send alone, shows on the settings surface, and retries next tick", async () => {
+    await seedConfirmed(addresses(3));
+    const send = await dueSend({ subject: "Owls in winter" });
+    failFakeNotify(1);
+    const surface = async () =>
+      (
+        (await (await SELF.fetch(`${base}/api/settings`, { headers: AUTH })).json()) as {
+          notification_status: Awaited<ReturnType<typeof notifications.notificationStatus>>;
+        }
+      ).notification_status;
+
+    await ticks(1);
+    const failed = (await sends.getSend(env.DB, send.id))!;
+    expect(failed.status).toBe("sent");
+    expect(await sends.deliveryRollup(env.DB, send.id)).toEqual({ accepted: 3 });
+    expect(fakeNotifications()).toHaveLength(0);
+    expect(await surface()).toMatchObject({
+      last_sent: null,
+      last_failure: {
+        kind: "finished",
+        subject: "Owls in winter",
+        error: "fake notification failure",
+      },
+    });
+
+    await ticks(1);
+    expect(fakeNotifications()).toHaveLength(1); // the retry got through
+    expect(await surface()).toMatchObject({
+      last_sent: { kind: "finished", subject: "Owls in winter" },
+      last_failure: null,
+    });
+    expect(logged(warnings)).toContainEqual(
+      expect.objectContaining({ event: "notify.failed", sendId: send.id, kind: "finished" }),
+    );
+  });
+
+  it("gives up after the cap and says so, never mailing the list or changing the record", async () => {
+    await seedConfirmed(addresses(2));
+    const send = await dueSend({ subject: "Owls in winter" });
+    failFakeNotify(100);
+
+    await ticks(MAX_NOTIFY_ATTEMPTS + 3);
+    expect(fakeNotifications()).toHaveLength(0);
+    expect(await rows(send.id)).toMatchObject([
+      {
+        kind: "finished",
+        status: "failed",
+        attempts: MAX_NOTIFY_ATTEMPTS,
+        error: "fake notification failure",
+      },
+    ]);
+    expect(transport.mailed).toHaveLength(2);
+    const status = await notifications.notificationStatus(env.DB);
+    expect(status.last_sent).toBeNull();
+    expect(status.last_failure).toMatchObject({
+      kind: "finished",
+      subject: "Owls in winter",
+      error: "fake notification failure",
+    });
+  });
+
+  it("logs what it tells the publisher without the publisher's address", async () => {
+    allowErrorLogs("notify.error");
+    const infos = vi.spyOn(console, "log");
+    await seedConfirmed(addresses(2));
+    await dueSend({ subject: "Owls in winter" });
+    failFakeNotify(1);
+    await ticks(3); // a failed try, then the retry that gets through
+    vi.spyOn(channel, "getNotifier").mockImplementation(() => {
+      throw new Error("no channel at all");
+    });
+    await dueSend({ subject: "Owls in spring" });
+    await ticks(2);
+
+    const lines = logged(infos, warnings, errors).filter((l) => l.event.startsWith("notify."));
+    expect(new Set(lines.map((l) => l.event))).toEqual(
+      new Set(["notify.failed", "notify.sent", "notify.error"]),
+    );
+    const local = PUBLISHER.split("@")[0];
+    for (const line of lines) {
+      expect(JSON.stringify(line).toLowerCase()).not.toContain(`${local}@`);
+    }
+  });
+
+  it("a notifier that throws outright never stops a send finishing", async () => {
+    allowErrorLogs("notify.error");
+    await seedConfirmed(addresses(2));
+    const send = await dueSend();
+    vi.spyOn(channel, "getNotifier").mockImplementation(() => {
+      throw new Error("no channel at all");
+    });
+
+    await ticks(2);
+    expect((await sends.getSend(env.DB, send.id))!.status).toBe("sent");
+    expect(logged(errors)).toContainEqual(
+      expect.objectContaining({ event: "notify.error", error: "no channel at all" }),
+    );
+  });
+
+  it("a tick with a backlog stays inside the subrequest budget", async () => {
+    allowErrorLogs("send.missed");
+    await seedConfirmed(addresses(1));
+    for (let i = 0; i < 25; i++) {
+      await frozenSend(Date.now() - MISSED_THRESHOLD_MS - 60_000, { subject: `Backlog ${i}` });
+    }
+    const guard = guardD1(env.DB);
+    const capped = { ...env, DB: guard.db } as AppEnv;
+    const limit = getConfig(capped).subrequestBudget;
+
+    for (let i = 0; i < 6; i++) {
+      const before = guard.statements;
+      const mailedBefore = transport.requests;
+      const notifiedBefore = fakeNotifications().length;
+      await sweep(capped);
+      const spent =
+        guard.statements -
+        before +
+        (transport.requests - mailedBefore) +
+        (fakeNotifications().length - notifiedBefore);
+      expect(spent).toBeLessThanOrEqual(limit);
+      // At least one notification every tick, however much the sends spent.
+      expect(fakeNotifications().length, `tick ${i}`).toBeGreaterThan(notifiedBefore);
+    }
+  });
+});
+
+describe("several addresses (SPEC §8)", () => {
+  const OPERATOR = "operator@example.com";
+
+  beforeEach(async () => {
+    await updateSettings(env.DB, { notifications: { to: [PUBLISHER, OPERATOR] } });
+  });
+
+  const sentTo = async () =>
+    (
+      await env.DB.prepare("SELECT sent_to FROM notifications WHERE kind <> 'test'").first<{
+        sent_to: string;
+      }>()
+    )?.sent_to;
+
+  it("tells every address of each event", async () => {
+    await seedConfirmed(addresses(2));
+    const send = await dueSend({ subject: "Owls in winter" });
+
+    await ticks(3);
+    expect(fakeNotifications().map((n) => [n.to, n.subject])).toEqual([
+      [PUBLISHER, "Sent: Owls in winter"],
+      [OPERATOR, "Sent: Owls in winter"],
+    ]);
+    expect(await rows(send.id)).toMatchObject([{ kind: "finished", status: "sent", attempts: 1 }]);
+  });
+
+  it("an address that fails is tried again alone, never resending to the one that got it", async () => {
+    await seedConfirmed(addresses(2));
+    const send = await dueSend({ subject: "Owls in winter" });
+    failFakeNotify(1); // the first address's delivery
+
+    await ticks(1); // the send goes out, and both are tried
+    expect(fakeNotifications().map((n) => n.to)).toEqual([OPERATOR]);
+    expect(await rows(send.id)).toMatchObject([
+      {
+        kind: "finished",
+        status: "pending",
+        attempts: 1,
+        error: `${PUBLISHER}: fake notification failure`,
+      },
+    ]);
+    expect(await notifications.notificationStatus(env.DB)).toMatchObject({
+      last_failure: { kind: "finished", error: `${PUBLISHER}: fake notification failure` },
+    });
+
+    await ticks(2); // the retry, then a tick with nothing left to try
+    expect(fakeNotifications().map((n) => n.to)).toEqual([OPERATOR, PUBLISHER]);
+    expect(await rows(send.id)).toMatchObject([
+      { kind: "finished", status: "sent", attempts: 2, error: null },
+    ]);
+    expect(JSON.parse((await sentTo())!)).toEqual([OPERATOR, PUBLISHER]);
+  });
+
+  it("a tick short of room reaches what it can and leaves the rest for the next, without spending a try", async () => {
+    await notifications.sandboxNotice(env.DB, Date.now());
+
+    // The reserve alone affords one address.
+    await notifyPublisher(env as AppEnv, new Budget(NOTIFY_RESERVE));
+    expect(fakeNotifications().map((n) => n.to)).toEqual([PUBLISHER]);
+    expect(await rows()).toMatchObject([{ kind: "sandbox", status: "pending", attempts: 0 }]);
+
+    await notifyPublisher(env as AppEnv, new Budget(50));
+    expect(fakeNotifications().map((n) => n.to)).toEqual([PUBLISHER, OPERATOR]);
+    expect(await rows()).toMatchObject([{ kind: "sandbox", status: "sent", attempts: 1 }]);
+  });
+
+  it("gives up on an address that keeps failing after the cap, never mailing the one it reached again", async () => {
+    await notifications.sandboxNotice(env.DB, Date.now());
+    for (let i = 0; i < MAX_NOTIFY_ATTEMPTS; i++) {
+      failFakeNotify(1); // the publisher's address, tried first on every try
+      await notifyPublisher(env as AppEnv, new Budget(50));
+    }
+    expect(fakeNotifications().map((n) => n.to)).toEqual([OPERATOR]);
+    expect(await rows()).toMatchObject([
+      {
+        kind: "sandbox",
+        status: "failed",
+        attempts: MAX_NOTIFY_ATTEMPTS,
+        error: `${PUBLISHER}: fake notification failure`,
+      },
+    ]);
+
+    await notifyPublisher(env as AppEnv, new Budget(50));
+    expect(fakeNotifications().map((n) => n.to)).toEqual([OPERATOR]);
+  });
+
+  it("an address added while one is pending gets it, and one removed is no longer waited on", async () => {
+    await notifications.sandboxNotice(env.DB, Date.now());
+    failFakeNotify(1);
+    await notifyPublisher(env as AppEnv, new Budget(50));
+    expect(fakeNotifications().map((n) => n.to)).toEqual([OPERATOR]);
+
+    await updateSettings(env.DB, { notifications: { to: [OPERATOR] } });
+    await notifyPublisher(env as AppEnv, new Budget(50));
+    expect(fakeNotifications().map((n) => n.to)).toEqual([OPERATOR]);
+    expect(await rows()).toMatchObject([{ kind: "sandbox", status: "sent" }]);
+  });
+});
+
+describe("after the review", () => {
+  it("a send that resumes after a long refusal is not then reported as stuck", async () => {
+    await seedConfirmed(addresses(1));
+    const send = await dueSend({ subject: "Resumed one" });
+    const long = Date.now() - STUCK_THRESHOLD_MS - 60 * 60_000;
+    await env.DB.prepare(
+      "UPDATE sends SET status = 'sending', started_at = ?, c_pending = 1, halt_reason = 'account', halted_at = ?, halt_retry_at = ? WHERE id = ?",
+    )
+      .bind(long, long, Date.now() + 60 * 60_000, send.id)
+      .run();
+    await notifications.recordNotifications(env.DB, Date.now());
+    // The account is fixed: the provider answers, which lifts the refusal and is progress,
+    // and the send is back to work, long past its start.
+    await env.DB.prepare(
+      "UPDATE sends SET halt_reason = NULL, halted_at = NULL, halt_error = NULL, progress_at = ? WHERE id = ?",
+    )
+      .bind(Date.now(), send.id)
+      .run();
+    await notifications.recordNotifications(env.DB, Date.now());
+
+    expect((await rows(send.id)).map((r) => r.kind)).toEqual(["refused"]);
+  });
+
+  it("a problem that clears before its notification gets through is dropped, not sent late", async () => {
+    await seedConfirmed(addresses(2));
+    const send = await dueSend({ subject: "Owls in winter" });
+    transport.refuse = "ses 429 LimitExceededException: Daily message quota exceeded.";
+    transport.refuseCause = "quota";
+    failFakeNotify(1);
+    await ticks(1);
+    expect(await rows(send.id)).toMatchObject([
+      { kind: "refused", status: "pending", error: "fake notification failure" },
+    ]);
+
+    transport.refuse = null;
+    await ticks(3);
+    expect((await sends.getSend(env.DB, send.id))!.status).toBe("sent");
+    expect(fakeNotifications().map((n) => n.subject)).toEqual(["Sent: Owls in winter"]);
+    const byKind = Object.fromEntries((await rows(send.id)).map((r) => [r.kind, r.status]));
+    expect(byKind).toEqual({ refused: "cleared", finished: "sent" });
+    // A cleared notification is not a channel failure.
+    expect((await notifications.notificationStatus(env.DB)).last_failure).toBeNull();
+  });
+
+  it("a test that gets through clears Not delivered, and a failed one takes its place", async () => {
+    await seedConfirmed(addresses(1));
+    await dueSend();
+    failFakeNotify(100);
+    await ticks(MAX_NOTIFY_ATTEMPTS + 2);
+    expect((await notifications.notificationStatus(env.DB)).last_failure).not.toBeNull();
+
+    clearFakeNotifications();
+    const test = async () =>
+      SELF.fetch(`${base}/api/settings/notifications/test`, {
+        method: "POST",
+        headers: AUTH,
+      });
+    expect((await test()).status).toBe(200);
+    let status = await notifications.notificationStatus(env.DB);
+    expect(status.last_failure).toBeNull();
+    expect(status.last_sent).toMatchObject({ kind: "test", subject: "" });
+
+    failFakeNotify(1);
+    expect((await test()).status).toBe(502);
+    status = await notifications.notificationStatus(env.DB);
+    expect(status.last_failure).toMatchObject({ kind: "test", error: "fake notification failure" });
+    const { n } = (await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM notifications WHERE kind = 'test'",
+    ).first<{ n: number }>())!;
+    expect(n).toBe(1); // only the latest test is kept
+  });
+
+  it("deleting a draft whose canceled send has a notification deletes it too", async () => {
+    await seedConfirmed(addresses(1));
+    const send = await frozenSend(Date.now() + 24 * 60 * 60 * 1000, { subject: "Canceled one" });
+    await env.DB.prepare("UPDATE sends SET fire_at = ? WHERE id = ?")
+      .bind(Date.now() - MISSED_THRESHOLD_MS - 60_000, send.id)
+      .run();
+    await notifications.recordNotifications(env.DB, Date.now());
+    expect((await rows(send.id)).map((r) => r.kind)).toEqual(["missed"]);
+
+    // Past its window it can no longer be canceled through the API; the operator's own
+    // database fix stands in, so the draft can be deleted.
+    await env.DB.batch([
+      env.DB.prepare("UPDATE sends SET status = 'canceled' WHERE id = ?").bind(send.id),
+      env.DB.prepare("UPDATE posts SET status = 'draft' WHERE id = ?").bind(send.post_id),
+    ]);
+    await posts.deletePost(env.DB, send.post_id);
+    expect(await rows(send.id)).toEqual([]);
+    expect(await sends.getSend(env.DB, send.id)).toBeNull();
+  });
+});
+
+describe("the channels", () => {
+  it("Cloudflare's binding gets one message to the publisher, from the configured sender", async () => {
+    const send = vi.fn(async () => ({ messageId: "m1" }));
+    const notifier = new CloudflareNotifier(
+      { send } as unknown as SendEmail,
+      "Lettre <lettre@newsletter.example.com>",
+    );
+    await notifier.send(PUBLISHER, { subject: "S", text: "T", html: "<p>T</p>" });
+    expect(send).toHaveBeenCalledWith({
+      from: { name: "Lettre", email: "lettre@newsletter.example.com" },
+      to: PUBLISHER,
+      subject: "S",
+      text: "T",
+      html: "<p>T</p>",
+    });
+  });
+
+  it("Cloudflare's refusal surfaces as the channel's words", async () => {
+    const notifier = new CloudflareNotifier(
+      {
+        send: async () => {
+          throw new Error("E_RECIPIENT_NOT_ALLOWED: destination address not verified");
+        },
+      } as unknown as SendEmail,
+      "lettre@newsletter.example.com",
+    );
+    await expect(notifier.send(PUBLISHER, { subject: "S", text: "T", html: "" })).rejects.toThrow(
+      "destination address not verified",
+    );
+  });
+
+  it("the provider fallback delivers through the newsletter's provider, and fails with its words when it refuses", async () => {
+    const config = { ...getConfig(env), provider: "ses" as const };
+    const notifier = new ProviderNotifier(config, env as AppEnv);
+    await notifier.send(
+      PUBLISHER,
+      { subject: "S", text: "T", html: "" },
+      "send1-finished-0",
+      new Contacts(),
+    );
+    expect(transport.mailed).toEqual([{ to: PUBLISHER, key: "notify-send1-finished-0:1" }]);
+
+    transport.refuse = "ses 400 MailFromDomainNotVerifiedException: domain not verified";
+    await expect(
+      notifier.send(
+        PUBLISHER,
+        { subject: "S", text: "T", html: "" },
+        "send1-refused-5",
+        new Contacts(),
+      ),
+    ).rejects.toThrow("domain not verified");
+  });
+});
+
+describe("the channel is deploy config", () => {
+  const cfg = (over: Record<string, unknown>) => getConfig({ ...env, ...over } as AppEnv);
+  const binding = { send: async () => ({}) } as unknown as SendEmail;
+
+  it("dev is always the fake, even with the binding declared", () => {
+    expect(cfg({ NOTIFY: binding }).notifyChannel).toBe("fake");
+  });
+
+  it("deployed: Cloudflare when bound, from letretro@ the app's host unless NOTIFY_FROM says", () => {
+    const deployed = { ...SES_DEPLOY, APP_ORIGIN: "https://newsletter.birds.example" };
+    expect(cfg({ ...deployed, NOTIFY: binding })).toMatchObject({
+      notifyChannel: "cloudflare",
+      notifyFrom: "Lettre <letretro@newsletter.birds.example>",
+    });
+    expect(
+      cfg({ ...deployed, NOTIFY: binding, NOTIFY_FROM: "alerts@newsletter.birds.example" })
+        .notifyFrom,
+    ).toBe("alerts@newsletter.birds.example");
+    expect(cfg(deployed)).toMatchObject({
+      notifyChannel: "provider",
+      notifyFrom: SES_DEPLOY.FROM_ADDRESS,
+    });
+  });
+});
+
+describe("the settings surface", () => {
+  const put = async (patch: unknown) =>
+    SELF.fetch(`${base}/api/settings`, {
+      method: "PUT",
+      headers: JSON_AUTH,
+      body: JSON.stringify(patch),
+    });
+  const get = async () =>
+    (await (await SELF.fetch(`${base}/api/settings`, { headers: AUTH })).json()) as any;
+  const test = async () =>
+    SELF.fetch(`${base}/api/settings/notifications/test`, {
+      method: "POST",
+      headers: AUTH,
+    });
+
+  it("stores the addresses as a preference, normalized, and reflects the channel read-only", async () => {
+    const res = await put({
+      notifications: { to: ["  Me@Example.COM ", "", "ops@example.com", "me@example.com"] },
+    });
+    expect(res.status).toBe(200);
+    const body = await get();
+    expect(body.settings.notifications).toEqual({ to: ["me@example.com", "ops@example.com"] });
+    expect(body.deployment.notify_channel).toBe("fake");
+    expect(body.deployment.notify_from).toBe(env.FROM_ADDRESS);
+    expect(body.notification_status).toEqual({ last_sent: null, last_failure: null });
+  });
+
+  it("keeps an address saved before notifications went to several, as a list of that one, until the next save (SPEC §8)", async () => {
+    const stored = async (to: string) =>
+      env.DB.prepare("UPDATE settings SET data = ? WHERE id = 1")
+        .bind(JSON.stringify({ notifications: { to } }))
+        .run();
+
+    await stored("me@example.com");
+    expect((await get()).settings.notifications).toEqual({ to: ["me@example.com"] });
+    expect(await test()).toHaveProperty("status", 200);
+    expect(fakeNotifications().map((n) => n.to)).toEqual(["me@example.com"]);
+
+    // The next save of anything stores the list.
+    await put({ test_recipients: [] });
+    const row = await env.DB.prepare("SELECT data FROM settings WHERE id = 1").first<{
+      data: string;
+    }>();
+    expect(JSON.parse(row!.data).notifications).toEqual({ to: ["me@example.com"] });
+
+    await stored("");
+    expect((await get()).settings.notifications).toEqual({ to: [] });
+  });
+
+  it("refuses an address that isn't one, and a wrong type naming the field", async () => {
+    expect((await put({ notifications: { to: ["not-an-address"] } })).status).toBe(400);
+    for (const to of [5, "me@example.com"]) {
+      const wrong = await put({ notifications: { to } });
+      expect(wrong.status).toBe(400);
+      expect(((await wrong.json()) as any).field).toBe("notifications.to");
+    }
+  });
+
+  it(`refuses more than ${MAX_NOTIFY_ADDRESSES} addresses, keeping the ones saved`, async () => {
+    const many = Array.from({ length: MAX_NOTIFY_ADDRESSES + 1 }, (_, i) => `a${i}@example.com`);
+    const res = await put({ notifications: { to: many } });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as any).field).toBe("notifications.to");
+    expect((await get()).settings.notifications).toEqual({ to: [PUBLISHER] });
+  });
+
+  it("changing the address asks nothing of scheduled sends: it is not an input to any email", async () => {
+    await frozenSend(Date.now() + 24 * 60 * 60 * 1000, { subject: "Scheduled one" });
+    const res = await put({ notifications: { to: ["other@example.com"] } });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as any).remade).toEqual([]);
+  });
+
+  it("sends a test to the saved address only, and reports a refusing channel as a 502", async () => {
+    await updateSettings(env.DB, { notifications: { to: [] } });
+    expect((await test()).status).toBe(400);
+
+    await updateSettings(env.DB, { notifications: { to: [PUBLISHER] } });
+    const ok = await test();
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ to: [PUBLISHER], failed: [], channel: "fake" });
+    expect(fakeNotifications().map((n) => n.to)).toEqual([PUBLISHER]);
+    // Its link opens Settings, carried in the query so an Access login keeps it.
+    expect(JSON.stringify(fakeNotifications()[0])).toContain("/dashboard/?to=/settings");
+
+    failFakeNotify(1);
+    const refused = await test();
+    expect(refused.status).toBe(502);
+    expect(await refused.json()).toMatchObject({
+      error: "notify_failed",
+      message: "fake notification failure",
+    });
+  });
+
+  it("sends a test to every saved address, naming the one the channel refused while the other gets it", async () => {
+    const OPERATOR = "operator@example.com";
+    await updateSettings(env.DB, { notifications: { to: [PUBLISHER, OPERATOR] } });
+
+    failFakeNotify(1);
+    const some = await test();
+    expect(some.status).toBe(200);
+    expect(await some.json()).toEqual({
+      to: [PUBLISHER, OPERATOR],
+      failed: [{ email: PUBLISHER, error: "fake notification failure" }],
+      channel: "fake",
+    });
+    expect(fakeNotifications().map((n) => n.to)).toEqual([OPERATOR]);
+    expect((await get()).notification_status.last_failure).toMatchObject({
+      kind: "test",
+      error: `${PUBLISHER}: fake notification failure`,
+    });
+
+    failFakeNotify(2);
+    const none = await test();
+    expect(none.status).toBe(502);
+    expect(await none.json()).toMatchObject({
+      error: "notify_failed",
+      message: `${PUBLISHER}: fake notification failure; ${OPERATOR}: fake notification failure`,
+    });
+
+    const all = await test();
+    expect(await all.json()).toMatchObject({ failed: [] });
+    expect(fakeNotifications().map((n) => n.to)).toEqual([OPERATOR, PUBLISHER, OPERATOR]);
+    expect((await get()).notification_status.last_failure).toBeNull();
+  });
+});
+
+describe("the link in a notification", () => {
+  it("opens the send's own page, carried in the query, for every kind", () => {
+    const config = getConfig(env);
+    const kinds: SendNotificationKind[] = [
+      "finished",
+      "refused",
+      "stuck",
+      "wedged",
+      "missed",
+      "no_receipts",
+    ];
+    for (const kind of kinds) {
+      const email = composeNotification(
+        {
+          send_id: "s 1",
+          kind,
+          episode: 0,
+          attempts: 0,
+          sent_to: [],
+          subject: "Owls",
+          send_status: "sent",
+          fire_at: 0,
+          started_at: null,
+          completed_at: null,
+          locked_until: null,
+          halt_reason: null,
+          halted_at: null,
+          halt_retry_at: null,
+          progress_at: null,
+          halt_cause: null,
+          halt_error: null,
+          c_pending: 0,
+          c_in_flight: 0,
+          c_accepted: 0,
+          c_delivered: 0,
+          c_bounced: 0,
+          c_complained: 0,
+          c_skipped: 0,
+          c_unsent: 0,
+          receipt_since: 0,
+        },
+        config,
+      );
+      const link = sendLink(config, "s 1");
+      if (kind === "wedged") {
+        // Lettre can't tell whether a lost request went out, so the advice names the safe choice.
+        expect(email.text).toContain("Unless you know otherwise, choose Assume not sent.");
+      }
+      expect(email.text, kind).toContain(link);
+      expect(email.html, kind).toContain(`href="${link}"`);
+      // The editor opens the page the link names, with the id's own encoding intact.
+      expect(new URL(link).pathname, kind).toBe("/dashboard/");
+      expect(dashboardRouteFromSearch(new URL(link).search), kind).toBe("#/sent/s%201");
+    }
+  });
+});
+
+describe("what the publisher is told agrees with what every surface shows (SPEC §8)", () => {
+  // The email words a problem for a reader opening it cold, and the editor and the API word
+  // it for a page beside the send, so the sentences differ by design. What can't differ is
+  // the rule (a problem is told exactly when the send shows its condition) and the facts
+  // (the provider's words, the fix, how many recipients). Each case is one send state.
+  const TOLD = ["refused", "stuck", "wedged", "missed"];
+  const MIN = 60_000;
+  const cases: { name: string; state: (now: number) => Record<string, number | string | null> }[] =
+    [
+      {
+        name: "refused: a hold short of an outage",
+        state: (now) => ({
+          status: "sending",
+          started_at: now - 5 * MIN,
+          progress_at: now - 5 * MIN,
+          c_pending: 4,
+          halt_reason: "account",
+          halt_cause: "quota",
+          halt_error: "Daily message quota exceeded",
+          halted_at: now - 4 * MIN,
+          halt_retries: 1,
+          halt_retry_at: now + 10 * MIN,
+        }),
+      },
+      {
+        name: "refused: the send's own email",
+        state: (now) => ({
+          status: "sending",
+          started_at: now - 5 * MIN,
+          progress_at: now - 5 * MIN,
+          c_pending: 4,
+          halt_reason: "account",
+          halt_cause: "content",
+          halt_error: "Message rejected",
+          halted_at: now - 4 * MIN,
+          halt_retries: 1,
+          halt_retry_at: now + 10 * MIN,
+        }),
+      },
+      {
+        name: "unavailable: shown, not told",
+        state: (now) => ({
+          status: "sending",
+          started_at: now - 5 * MIN,
+          progress_at: now - 5 * MIN,
+          c_pending: 4,
+          halt_reason: "unavailable",
+          halt_cause: "outage",
+          halt_error: "Service unavailable",
+          halted_at: now - 4 * MIN,
+          halt_retries: 1,
+          halt_retry_at: now + 1 * MIN,
+        }),
+      },
+      {
+        name: "stuck",
+        state: (now) => ({
+          status: "sending",
+          started_at: now - 60 * MIN,
+          progress_at: now - 40 * MIN,
+          c_pending: 4,
+        }),
+      },
+      {
+        name: "slow but moving",
+        state: (now) => ({
+          status: "sending",
+          started_at: now - 60 * MIN,
+          progress_at: now - 2 * MIN,
+          c_pending: 4,
+        }),
+      },
+      {
+        name: "wedged",
+        state: (now) => ({
+          status: "sending",
+          started_at: now - 20 * MIN,
+          progress_at: now - 15 * MIN,
+          c_pending: 0,
+          c_in_flight: 3,
+          locked_until: null,
+        }),
+      },
+      {
+        name: "wedged after a refusal",
+        state: (now) => ({
+          status: "sending",
+          started_at: now - 20 * MIN,
+          progress_at: now - 15 * MIN,
+          c_pending: 0,
+          c_in_flight: 3,
+          locked_until: null,
+          halt_reason: "account",
+          halt_cause: "quota",
+          halt_error: "Daily quota exceeded",
+          halted_at: now - 10 * MIN,
+          halt_retries: 2,
+          halt_retry_at: now + 20 * MIN,
+        }),
+      },
+      { name: "missed", state: (now) => ({ status: "scheduled", fire_at: now - 10 * MIN }) },
+      {
+        name: "due, inside the tolerance",
+        state: (now) => ({ status: "scheduled", fire_at: now - 2 * MIN }),
+      },
+    ];
+
+  async function setUp(state: Record<string, number | string | null>) {
+    const send = await frozenSend(Date.now() + 60 * MIN);
+    const cols = Object.keys(state);
+    await env.DB.prepare(`UPDATE sends SET ${cols.map((c) => `${c} = ?`).join(", ")} WHERE id = ?`)
+      .bind(...cols.map((c) => state[c] ?? null), send.id)
+      .run();
+    return send;
+  }
+
+  async function shown(id: string) {
+    const res = await SELF.fetch(`${base}/api/sends/${id}`, { headers: AUTH });
+    const { send } = (await res.json()) as {
+      send: {
+        conditions: {
+          kind: string;
+          message: string;
+          advice?: string;
+          error?: string;
+          count?: number;
+        }[];
+      };
+    };
+    return send.conditions;
+  }
+
+  for (const c of cases) {
+    it(`${c.name}: told exactly when the send shows the condition, with its facts`, async () => {
+      const now = Date.now();
+      const send = await setUp(c.state(now));
+      await notifications.recordNotifications(env.DB, now);
+      const conditions = await shown(send.id);
+      const showing = conditions
+        .map((cond) => cond.kind)
+        .filter((k) => TOLD.includes(k))
+        .sort();
+      const told = (await rows(send.id))
+        .map((r) => r.kind)
+        .filter((k) => TOLD.includes(k))
+        .sort();
+      expect(told).toEqual(showing);
+      // And each told problem still holds by the notifier's own check, as it would before sending.
+      const due = (await notifications.dueNotifications(env.DB, 10)).filter(
+        (n): n is notifications.DueNotification => n.send_id === send.id && TOLD.includes(n.kind),
+      );
+      expect(due.map((n) => n.kind).sort()).toEqual(showing);
+      expect(
+        due
+          .filter((n) => stillHolds(n, now))
+          .map((n) => n.kind)
+          .sort(),
+      ).toEqual(showing);
+      // The email carries what the condition does: the provider's words, the fix, the count.
+      const config = getConfig(env as unknown as AppEnv);
+      for (const n of due) {
+        const email = composeNotification(n, config).text;
+        const cond = conditions.find((x) => x.kind === n.kind);
+        if (n.kind === "refused") {
+          expect(email).toContain(cond?.error);
+          expect(cond?.message).toContain(cond?.advice);
+          expect(email).toContain(cond?.advice);
+          expect(cond?.message).toContain("No one has been marked unsent");
+          expect(email).toContain("No one has been marked unsent");
+        }
+        if (n.kind === "wedged") {
+          expect(cond?.count).toBe(3);
+          expect(cond?.message).toContain("never answered for 3 recipients");
+          expect(email).toContain("never answered for 3 recipients");
+        }
+      }
+    });
+  }
+
+  it("a provider's words name a reader only behind the login, never in the email (SPEC §12)", async () => {
+    const now = Date.now();
+    const send = await setUp({
+      status: "sending",
+      started_at: now - 5 * MIN,
+      progress_at: now - 5 * MIN,
+      c_pending: 4,
+      halt_reason: "account",
+      halt_cause: "invalid_request",
+      halt_error: "ses 400 InvalidParameterValue: Illegal address ada@example.com",
+      halted_at: now - 4 * MIN,
+      halt_retries: 1,
+      halt_retry_at: now + 10 * MIN,
+    });
+    await notifications.recordNotifications(env.DB, now);
+    const [due] = await notifications.dueNotifications(env.DB, 1);
+    const email = composeNotification(due as notifications.DueNotification, getConfig(env));
+    expect(email.text).toContain("Illegal address …@example.com");
+    expect(email.html).not.toContain("ada@");
+    const shownNow = await shown(send.id);
+    expect(shownNow.find((c) => c.kind === "refused")?.error).toContain("ada@example.com");
+  });
+
+  it("a refusal two sends share is told for the one still held, when the other has wedged", async () => {
+    // One account refusal holds both sends (the second joined it, so they share when it
+    // began); the first then wedges on a request that got no answer. The refusal still
+    // holds the second, so it is told there, not lost behind the wedged one.
+    const now = Date.now();
+    const halt = {
+      halt_reason: "account",
+      halt_cause: "quota",
+      halt_error: "Daily quota exceeded",
+      halted_at: now - 10 * MIN,
+      halt_retries: 2,
+      halt_retry_at: now + 20 * MIN,
+    };
+    const a = await setUp({
+      status: "sending",
+      started_at: now - 20 * MIN,
+      progress_at: now - 15 * MIN,
+      c_pending: 4,
+      ...halt,
+    });
+    const b = await setUp({
+      status: "sending",
+      started_at: now - 20 * MIN,
+      progress_at: now - 15 * MIN,
+      c_pending: 4,
+      ...halt,
+    });
+    const [first, second] = a.id < b.id ? [a, b] : [b, a];
+    await env.DB.prepare(
+      "UPDATE sends SET c_pending = 0, c_in_flight = 3, locked_until = NULL WHERE id = ?",
+    )
+      .bind(first.id)
+      .run();
+    await notifications.recordNotifications(env.DB, now);
+    expect((await rows(first.id)).map((r) => r.kind)).toEqual(["wedged"]);
+    expect((await rows(second.id)).map((r) => r.kind)).toEqual(["refused"]);
+    expect((await shown(second.id)).map((cond) => cond.kind)).toContain("refused");
+  });
+});
+
+describe("no receipts from the provider (SPEC §8)", () => {
+  const HOUR = 60 * 60_000;
+
+  /** A send the provider took, finished `ago` back, with `heard` receipts. */
+  async function finished(subject: string, ago: number, heard = 0) {
+    const at = Date.now() - ago;
+    const send = await frozenSend(at - 60_000, { subject });
+    await env.DB.prepare(
+      `UPDATE sends SET status = 'sent', started_at = ?1, completed_at = ?1, c_pending = 0,
+         c_accepted = 4, c_delivered = ?2 WHERE id = ?3`,
+    )
+      .bind(at, heard, send.id)
+      .run();
+    return send;
+  }
+
+  const told = async () =>
+    (await rows()).filter((r) => r.kind === "no_receipts").map((r) => r.send_id);
+
+  it("waits six hours, then tells once, however many sends go quiet", async () => {
+    const early = await finished("Early", 5 * HOUR);
+    await notifications.recordNotifications(env.DB, Date.now());
+    expect(await told()).toEqual([]);
+
+    vi.setSystemTime(Date.now() + 2 * HOUR);
+    await notifications.recordNotifications(env.DB, Date.now());
+    expect(await told()).toEqual([early.id]);
+
+    await finished("Quiet too", 6 * HOUR + 60_000);
+    await notifications.recordNotifications(env.DB, Date.now());
+    expect(await told()).toEqual([early.id]);
+  });
+
+  it("tells again only after a receipt has landed", async () => {
+    const first = await finished("First", 7 * HOUR);
+    await notifications.recordNotifications(env.DB, Date.now());
+    await env.DB.prepare("UPDATE sends SET c_delivered = 1 WHERE id = ?").bind(first.id).run();
+    vi.setSystemTime(Date.now() + 8 * HOUR);
+    const second = await finished("Second", 7 * HOUR);
+    await notifications.recordNotifications(env.DB, Date.now());
+    expect(await told()).toEqual([first.id, second.id]);
+  });
+
+  it("isn't told for a quiet send when a later one has heard from the provider", async () => {
+    await finished("Quiet", 7 * HOUR);
+    await finished("Heard", 6.5 * HOUR, 1);
+    await notifications.recordNotifications(env.DB, Date.now());
+    expect(await told()).toEqual([]);
+  });
+
+  it("is dropped if a later send hears a receipt while the channel keeps it from going", async () => {
+    const quiet = await finished("Quiet", 7 * HOUR);
+    failFakeNotify(2); // the quiet send's Sent email and this notice both wait
+    await notifyPublisher(env, new Budget(50));
+    expect((await rows(quiet.id)).find((r) => r.kind === "no_receipts")?.status).toBe("pending");
+
+    await finished("Heard", 6.5 * HOUR, 1);
+    clearFakeNotifications();
+    await notifyPublisher(env, new Budget(50));
+    expect((await rows(quiet.id)).find((r) => r.kind === "no_receipts")?.status).toBe("cleared");
+    expect(fakeNotifications().map((n) => n.subject)).not.toContain(
+      "Lettre isn’t hearing back from Amazon SES",
+    );
+  });
+
+  it("is dropped if a receipt lands before it goes, and words what it tells as a possibility", async () => {
+    const send = await finished("Owls", 7 * HOUR);
+    await notifications.recordNotifications(env.DB, Date.now());
+    const due = await notifications.dueNotifications(env.DB, 5);
+    const n = due.find((d) => d.kind === "no_receipts") as notifications.DueNotification;
+    expect(stillHolds(n, Date.now())).toBe(true);
+    const email = composeNotification(n, getConfig(env));
+    expect(email.subject).toBe("Lettre isn’t hearing back from Amazon SES");
+    expect(email.text).toContain("may not be reaching Lettre");
+    expect(stillHolds({ ...n, receipt_since: 1 }, Date.now())).toBe(false);
+    expect((await rows(send.id)).map((r) => r.kind)).toContain("no_receipts");
+  });
+});

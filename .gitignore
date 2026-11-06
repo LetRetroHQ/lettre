@@ -1,0 +1,36 @@
+# dependencies
+node_modules/
+
+# local secrets (never commit)
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.lettre.env
+.lettre.env.*
+.claude/settings.local.json
+
+# worktrees Claude Code creates inside the checkout
+.claude/worktrees/
+
+# wrangler / miniflare local state
+.wrangler/
+worker-configuration.d.ts
+
+# generated at build (scripts/stamp-version.mjs); regenerated at every entry point
+src/generated/
+
+# build output (the served admin tree, scripts/build-client.mjs from public/ + client/)
+dist/
+
+# test coverage
+coverage/
+
+# logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json

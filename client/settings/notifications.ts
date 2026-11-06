@@ -1,0 +1,169 @@
+// Settings' Notifications section (SPEC §8): where Lettre tells the publisher about their
+// sends is a preference, committed through the save bar; how it gets there, and from whom,
+// is deploy config, shown read-only beside it with how the last one went.
+
+import {
+  MAX_NOTIFY_ADDRESSES,
+  missedAddresses,
+  type NotificationStatusKind,
+  type NotificationTestResponse,
+  type SettingsResponse,
+} from "../../shared/settings";
+import { api } from "../api";
+import { $ } from "../ui/dom";
+import { fmt } from "../ui/format";
+import { type Html, html, setHtml } from "../ui/html";
+import { icon } from "../ui/icons";
+import { busy, toast } from "../ui/widgets";
+import { addressListHtml, mountAddressList } from "./address_list";
+import { providerLabel } from "./deploy";
+import { chip, message, type SectionHandle, type SettingsPage, secHead } from "./page";
+
+/** How the deploy-time notification channel reads to the publisher. */
+function notifyChannelLabel(
+  channel: SettingsResponse["deployment"]["notify_channel"],
+  provider: string,
+): string {
+  switch (channel) {
+    case "cloudflare":
+      return "Cloudflare Email, separate from your newsletter’s provider";
+    case "provider":
+      return provider === "none"
+        ? "Your email provider, once one is connected"
+        : `Your email provider (${providerLabel(provider)})`;
+    default:
+      return "Local stand-in: nothing is delivered";
+  }
+}
+
+const NOTIFICATION_KINDS: Record<NotificationStatusKind, string> = {
+  finished: "went out",
+  refused: "provider refusing",
+  stuck: "in flight too long",
+  wedged: "waiting to be resolved",
+  missed: "missed fire time",
+  no_receipts: "no receipts from the provider",
+  import: "list imported",
+  sandbox: "signup refused by the SES sandbox",
+  not_sending: "email not going out",
+  not_sending_held: "email not going out",
+  test: "test",
+};
+
+/** What a status line is about: the send and what happened, or just "test notification". */
+function aboutNotification(n: { kind: NotificationStatusKind; subject: string }): string {
+  if (n.kind === "test") {
+    return "test notification";
+  }
+  // A sandbox notice is about no send or import, so it has no subject to lead with.
+  return n.subject ? `${n.subject} (${NOTIFICATION_KINDS[n.kind]})` : NOTIFICATION_KINDS[n.kind];
+}
+
+/** The last delivered notification, and a newer failure when the channel has stopped working. */
+function notificationStatusHtml(status: SettingsResponse["notification_status"]): Html {
+  const { last_sent: lastSent, last_failure: lastFailure } = status;
+  if (lastFailure) {
+    return html`<span class="set-pill danger">Not delivered</span> <span class="muted">${fmt(lastFailure.at)}, ${aboutNotification(lastFailure)}: ${lastFailure.error}</span>`;
+  }
+  if (lastSent) {
+    return html`<span class="set-pill ok">${icon("check")}Delivered</span> <span class="muted">${fmt(lastSent.at)}, ${aboutNotification(lastSent)}</span>`;
+  }
+  return html`<span class="muted">None yet</span>`;
+}
+
+const NOTIFY_IDS = { chips: "notifyChips", input: "notifyTo", add: "notifyAdd" };
+
+export function notificationsSection(page: SettingsPage): Html {
+  const d = page.data.deployment;
+  return html`
+    <section class="set-sec">
+      ${secHead("Notifications", chip("editable", "Editable"))}
+      <p class="set-lede">Lettre emails you when a send goes out, and right away if a send runs into a problem.</p>
+      <div class="set-card">
+        <div class="set-recip">
+          <div class="set-field">
+            <label for="notifyTo">Send notifications to</label>
+            <p class="field-hint" style="margin:0">Each address gets every notification. Add whoever runs Lettre for you, so they’re told too. Up to ${MAX_NOTIFY_ADDRESSES}.</p>
+          </div>
+          ${addressListHtml(NOTIFY_IDS)}
+          <div class="row"><button type="button" class="ghost" id="notifyTest">Send a test notification</button><span class="field-hint" id="notifyTestHint"></span></div>
+        </div>
+        <div class="set-kv" style="border-top:1px solid var(--line)">
+          <div class="set-kv-k">Sent through</div><div class="set-kv-v">${notifyChannelLabel(d.notify_channel, d.provider)}</div>
+          <div class="set-kv-k">From address</div><div class="set-kv-v"><span class="mono">${d.notify_from}</span></div>
+          <div class="set-kv-k">Last notification</div><div class="set-kv-v" id="notifyStatus">${notificationStatusHtml(page.data.notification_status)}</div>
+        </div>
+        <div class="set-note">${icon("readonly")}<span>The channel and its sender are set at deploy. ${d.notify_channel === "provider" ? "Notifications go through your newsletter’s own provider, so one about the provider refusing your account cannot reach you; Cloudflare’s email avoids that. " : ""}See the <a class="set-link" href="#/docs/notifications">setup guide</a>.</span></div>
+      </div>
+    </section>`;
+}
+
+/** The addresses ride the save bar; the test goes to the SAVED addresses only (the server
+ *  never takes one from the request), so it waits for a save. Its outcome is the channel's
+ *  latest word, so the status line takes it in place. */
+export function mountNotifications(root: HTMLElement, page: SettingsPage): SectionHandle {
+  const test = $<HTMLButtonElement>("#notifyTest", root);
+  const testHint = $("#notifyTestHint", root);
+  const status = $("#notifyStatus", root);
+  const list = mountAddressList(root, page, {
+    ids: NOTIFY_IDS,
+    list: () => page.state.notifyTo,
+    empty: "No addresses yet, so Lettre emails no one. Add yours below.",
+    max: {
+      count: MAX_NOTIFY_ADDRESSES,
+      full: `Notifications go to at most ${MAX_NOTIFY_ADDRESSES} addresses. Remove one to add another.`,
+    },
+  });
+  const refreshTest = () => {
+    const saved = page.saved().notifyTo;
+    const reason =
+      saved.length === 0
+        ? "Save an address to send a test."
+        : page.state.notifyTo.join("\n") !== saved.join("\n")
+          ? "Save first: the test goes to the saved addresses."
+          : "";
+    test.disabled = Boolean(reason);
+    testHint.textContent = reason;
+  };
+  test.onclick = () =>
+    busy(test, "Sending…", async () => {
+      try {
+        const r = await api<NotificationTestResponse>("/api/settings/notifications/test", {
+          method: "POST",
+        });
+        const reached = r.to.filter((a) => !r.failed.some((f) => f.email === a));
+        toast(
+          r.channel === "fake"
+            ? `Test notification recorded for ${reached.join(", ")} (local stand-in: nothing is delivered)`
+            : `Test notification sent to ${reached.join(", ")}`,
+        );
+        // Some addresses missed it: the status row says which, as the server recorded it.
+        const error = missedAddresses(r.to, r.failed);
+        setHtml(
+          status,
+          notificationStatusHtml({
+            last_sent: { kind: "test", subject: "", at: Date.now() },
+            last_failure: error ? { kind: "test", subject: "", at: Date.now(), error } : null,
+          }),
+        );
+      } catch (err) {
+        // The outcome's home is the channel's status row, as it is for every notification;
+        // a toast would say it a second time.
+        setHtml(
+          status,
+          notificationStatusHtml({
+            last_sent: null,
+            last_failure: { kind: "test", subject: "", at: Date.now(), error: message(err) },
+          }),
+        );
+      }
+    });
+  refreshTest();
+  return {
+    repaint: refreshTest,
+    reset() {
+      list.reset?.();
+      refreshTest();
+    },
+  };
+}

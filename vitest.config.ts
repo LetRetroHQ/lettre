@@ -1,0 +1,129 @@
+import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
+import { configDefaults, defineConfig } from "vitest/config";
+
+// Four test projects, one per runtime a suite's code runs in:
+//
+//   worker — the Worker's suite (test/**/*.spec.ts), run inside the Workers runtime (workerd) via
+//            Miniflare with the real D1/R2 bindings from wrangler.jsonc. Migrations are
+//            read here (Node side) and injected as `TEST_MIGRATIONS`, then applied per
+//            test file by the setup file.
+//            https://developers.cloudflare.com/workers/testing/vitest-integration/
+//   client — the admin SPA's suite (client/**), run under happy-dom: pure client logic
+//            against a DOM, with no Worker, no bindings, and nothing of the pool above.
+//   shared — the suite for code both of them import (shared/**), run in plain Node: no
+//            DOM and no Worker, which is the contract that code must keep.
+//   cli    — the suite for the `lettre` command (test/cli/**/*.spec.mjs), run in plain
+//            Node as cli/ itself runs; kept under test/ so the package never ships it.
+//
+// The split is what lets client/ be tested at all — the workerd pool can't load browser
+// code — while keeping that pool exactly as it was for the Worker.
+export default defineConfig(async () => {
+  const migrations = await readD1Migrations("./migrations");
+  return {
+    test: {
+      // A passing test's console output is dropped and a failing one's kept. The Worker's
+      // structured log (src/lib/log.ts) writes a line per lifecycle step, and the send specs
+      // drive hundreds of them on purpose (halts, wedges, refusals), so printing them all
+      // buries the run's result; a spec that asserts on a line reads it through a spy.
+      silent: "passed-only",
+      projects: [
+        {
+          plugins: [
+            cloudflareTest({
+              wrangler: { configPath: "./wrangler.jsonc" },
+              miniflare: {
+                bindings: {
+                  TEST_MIGRATIONS: migrations,
+                  // Deterministic dev-token signing secret for auth tests. The env is
+                  // dev-shaped (fake transport, no Access), so getConfig honors it.
+                  DEV_AUTH_SECRET: "test-dev-secret",
+                  // The suite runs on the fake, named here, whatever a local `.dev.vars` sets
+                  // (a PROVIDER there to preview another state would otherwise leave the env
+                  // not dev-shaped and every authed spec a 401); a test that needs another
+                  // provider names it.
+                  PROVIDER: "fake",
+                  // Force the dev send simulation OFF for the suite regardless of a local
+                  // `.dev.vars` (miniflare bindings win over it). The simulation's paced
+                  // sleeps + injected edge states would make the deterministic tests slow and
+                  // flaky; it's a demo-only tool, exercised directly in send_simulation.spec.
+                  SIMULATE_SENDS: "",
+                  // And with it the account stand-in, which getConfig refuses without
+                  // SIMULATE_SENDS=ses; a test that needs one names it.
+                  SIMULATE_ACCOUNT: "",
+                  // The suite runs on the default minimum lead (five minutes) whatever a
+                  // local `.dev.vars` sets for dev; a test that needs another names it.
+                  MIN_LEAD_SECONDS: "",
+                  // And on the default subrequest budget (Workers Free), which the budget and
+                  // halt specs size their sends against, whatever a `.dev.vars` sets to model
+                  // Workers Paid; a test that needs another names it.
+                  SUBREQUEST_BUDGET: "",
+                },
+              },
+            }),
+          ],
+          test: {
+            name: "worker",
+            include: ["test/**/*.spec.ts"],
+            setupFiles: ["./test/apply_migrations.ts", "./test/log_guard.ts"],
+            // Don't discover specs inside git worktrees under .claude/ (task copies).
+            exclude: [...configDefaults.exclude, "**/.claude/**"],
+          },
+        },
+        {
+          // The build inlines client/ui/icons/*.svg as text (esbuild's text loader); Vite would
+          // hand a spec a URL for the same import, so this hands it the text too.
+          plugins: [
+            {
+              name: "svg-as-text",
+              enforce: "pre" as const,
+              async load(id: string) {
+                if (!id.split("?")[0]?.endsWith(".svg")) {
+                  return null;
+                }
+                const { readFile } = await import("node:fs/promises");
+                return `export default ${JSON.stringify(await readFile(id.split("?")[0] ?? id, "utf8"))};`;
+              },
+            },
+          ],
+          test: {
+            name: "client",
+            environment: "happy-dom",
+            // Every client spec starts with the real admin shell in the document (the
+            // shell module reads its roots at import time) and a scripted fetch at hand.
+            setupFiles: ["./client/test/setup.ts"],
+            // happy-dom loads an inserted <link rel=stylesheet> / <script src> for real by
+            // default, so a swap test would do DNS + TCP; these are DOM tests, not fetch tests.
+            environmentOptions: {
+              happyDOM: {
+                settings: {
+                  disableCSSFileLoading: true,
+                  disableJavaScriptFileLoading: true,
+                  // ...and a disabled load is a silent `load`, not a logged `error`.
+                  handleDisabledFileLoadingAsSuccess: true,
+                },
+              },
+            },
+            include: ["client/**/*.spec.ts"],
+            exclude: [...configDefaults.exclude, "**/.claude/**"],
+          },
+        },
+        {
+          test: {
+            name: "shared",
+            environment: "node",
+            include: ["shared/**/*.spec.ts"],
+            exclude: [...configDefaults.exclude, "**/.claude/**"],
+          },
+        },
+        {
+          test: {
+            name: "cli",
+            environment: "node",
+            include: ["test/cli/**/*.spec.mjs"],
+            exclude: [...configDefaults.exclude, "**/.claude/**"],
+          },
+        },
+      ],
+    },
+  };
+});

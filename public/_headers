@@ -1,0 +1,30 @@
+# Cache headers for the fingerprinted admin assets, applied by the Cloudflare
+# assets binding (see wrangler.jsonc). Without this, assets default to
+# `max-age=0, must-revalidate`, so every editor load revalidates and a
+# changed-but-same-named file can serve stale.
+#
+# These URLs carry a content fingerprint (`?v=<hash>`) that scripts/build-client.mjs
+# writes into the served index.html. A rebuild changes the hash, hence the URL, so a
+# given URL is immutable — safe to cache for a year with no revalidation, and a changed
+# asset is fetched because index.html now points at a new URL. (Stable names with a
+# query, not hashed filenames: the build script says why.)
+#
+# index.html itself is deliberately NOT listed: it must stay revalidating so it
+# can point at the new hashes. Scoped to the two fingerprinted assets on purpose.
+
+/dashboard/app.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/dashboard/styles.css
+  Cache-Control: public, max-age=31536000, immutable
+
+# The editor is never framed by another site (clickjacking). Every HTML page the Worker
+# serves carries the same, from src/lib/page_headers.ts; these two paths are the static
+# editor, which the Worker never sees.
+/dashboard
+  X-Frame-Options: DENY
+  Content-Security-Policy: frame-ancestors 'none'
+
+/dashboard/*
+  X-Frame-Options: DENY
+  Content-Security-Policy: frame-ancestors 'none'

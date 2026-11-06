@@ -1,0 +1,7343 @@
+@font-face {
+  font-family: "Gabarito";
+  src: url("/fonts/gabarito-latin-wght-normal.woff2") format("woff2");
+  font-weight: 400 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Gabarito";
+  src: url("/fonts/gabarito-latin-ext-wght-normal.woff2") format("woff2");
+  font-weight: 400 900;
+  font-display: swap;
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/jetbrains-mono-latin-wght-normal.woff2") format("woff2");
+  font-weight: 100 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/jetbrains-mono-latin-ext-wght-normal.woff2") format("woff2");
+  font-weight: 100 800;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+1E00-1EFF;
+}
+
+/* Lettre workspace tokens follow LetRetro UI; the theme control and system preference
+   select the matching light or dark palette. This is the admin surface's own
+   palette — independent of, and never loaded alongside, the reader/email-card
+   `TOKENS` in src/lib/page.ts. The two reuse names like --muted and --bg with
+   different values on purpose; don't assume they share meaning. */
+:root {
+  color-scheme: light;
+  /* Layering — one named z-index ladder (DESIGN §9). Every fixed or floating surface
+     references a rung by token, never a bare literal; the order encodes the intent.
+     z-index is theme-independent, so it lives only here (not the dark block). */
+  --z-content: 1;
+  --z-header: 10;
+  --z-menu: 20;
+  --z-bar: 30;
+  --z-modal: 40;
+  /* Toasts above modals: a toast raised while a dialog is open (an autosave that failed,
+     a send that started) must not sit dimmed beneath its backdrop. */
+  --z-toast: 50;
+  --fg: oklch(0.12 0.01 60);
+  --muted: oklch(0.45 0.02 60);
+  --line: oklch(0.88 0.01 90);
+  --bg: oklch(0.985 0.002 90);
+  --card: #ffffff;
+  --hover: oklch(0.96 0.005 90);
+  /* Neutral ink — the strong near-black/near-white neutral (DESIGN §8). A text token
+     for headings and strong labels; never a button fill (Primary is --accent). */
+  --ink: oklch(0.12 0.01 60);
+  --ink-on: oklch(0.985 0.002 90);
+  /* Semantic feedback — one {fg, bg, line} scale each for danger / warn / ok (DESIGN §8).
+     fg is the saturated hue (text on the soft bg, or a solid fill paired with an on-color);
+     bg is the soft tint behind a notice; line is its border. There is one red, not two —
+     the old --danger vs --b-bad-* split is collapsed here. Kept distinct from the
+     status-badge scales below, which label a post's lifecycle, not a feedback meaning. */
+  --danger-fg: #b91c1c;
+  --danger-bg: #fee2e2;
+  --danger-line: #fecaca;
+  --danger-on: #ffffff;
+  --warn-fg: #b45309;
+  --warn-bg: #fef3c7;
+  --warn-line: #fde68a;
+  --ok-fg: #15803d;
+  --ok-bg: #dcfce7;
+  --ok-line: #bbf7d0;
+  --ring: oklch(0.12 0.01 60);
+  --status-draft-bg: #f4f4f5;
+  --status-draft-fg: #52525b;
+  --status-draft-line: #d4d4d8;
+  /* Scheduled is a violet, deliberately off the slate-blue action accent (--accent)
+     so the "scheduled" status never reads as the primary action (DESIGN §8); the fill
+     backs the scheduled pill, banner, and cards, and the line borders them. */
+  --status-scheduled-bg: #ece6f9;
+  --status-scheduled-fg: #6743ac;
+  --status-scheduled-line: #cbbcf1;
+  --status-sent-bg: #dcfce7;
+  --status-sent-fg: #15803d;
+  --status-sent-line: #bbf7d0;
+  --status-sending-bg: #dbeafe;
+  --status-sending-fg: #2563eb;
+  --status-sending-line: #bfdbfe;
+  --font: "Gabarito", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
+  /* LetRetro UI uses the foreground ink for primary actions and emphasis. */
+  --accent: oklch(0.12 0.01 60);
+  --accent-on: oklch(0.985 0.002 90);
+  --accent-soft: oklch(0.94 0.005 90);
+  /* Syntax-highlight palette, shared by the template and post
+     editors — the HTML/CSS .cx-* tokens and the Markdown .cx-md-* tokens map onto it. */
+  --syntax-bg: #fbfbfc;
+  --syntax-fg: #3f3f46;
+  --syntax-gutter: #a1a1aa;
+  --syntax-tag: #7a5bd6;
+  --syntax-string: #0f7a5a;
+  --syntax-property: #1d4ed8;
+  --syntax-selector: #b0530c;
+  --syntax-number: #b0530c;
+  --syntax-at-rule: #a13d9e;
+  --syntax-punctuation: #a1a1aa;
+  --syntax-variable: #2d47b8;
+  --syntax-variable-bg: rgba(51, 85, 204, 0.11);
+  /* Post editor's minimal scheme: marks get the color, content keeps --syntax-fg.
+     Heading # is crimson; the emphasis asterisks are a magenta-pink kept clear of the heading
+     crimson; block markers (>, list bullets, fence language) are a saturated, bright orange. */
+  --syntax-heading: #be123c;
+  --syntax-emphasis: #db2777;
+  --syntax-quote: #ea580c;
+  /* Code surface — inline `code` chip and the fenced-block band. A hair off the editor well
+     (--syntax-bg), lighter than the neutral --chip, so code reads as code without a heavy box. */
+  --syntax-code-bg: #f2f2f4;
+  /* A doc's inline `code`: a maroon ink on the --chip surface, so a name in a sentence reads
+     apart from the prose around it and from a link's blue. */
+  --code-inline-fg: #9b2c2c;
+  /* HTTP method badges in the API reference (DESIGN §8). A self-contained palette like
+     --syntax-*: verb colors are a naming convention, not feedback or lifecycle, so they
+     borrow no semantic scale. The badge tints each over a wash of itself (.api-method). */
+  --method-get: #166534;
+  --method-post: #1d4ed8;
+  --method-put: #92400e;
+  --method-delete: #b91c1c;
+  /* A recessed surface for read-only facts (set-at-deploy cards), plus a slightly
+     stronger line + a neutral chip fill, layered on the zinc neutrals above. */
+  --sunken: oklch(0.96 0.005 90);
+  --line-soft: oklch(0.88 0.01 90);
+  --chip: oklch(0.94 0.005 90);
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --fg: oklch(0.94 0.004 90);
+  --muted: oklch(0.72 0.01 80);
+  --line: oklch(0.32 0.008 80);
+  --bg: oklch(0.16 0.008 60);
+  --card: oklch(0.21 0.008 60);
+  --hover: oklch(0.28 0.008 60);
+  --ink: oklch(0.94 0.004 90);
+  --ink-on: oklch(0.16 0.008 60);
+  --danger-fg: #f87171;
+  --danger-bg: #4c1d1d;
+  --danger-line: #b91c1c;
+  --danger-on: #18181b;
+  --warn-fg: #fbbf24;
+  --warn-bg: #45350f;
+  --warn-line: #b45309;
+  --ok-fg: #4ade80;
+  --ok-bg: #14532d;
+  --ok-line: #15803d;
+  --ring: oklch(0.9 0.005 90);
+  --status-draft-bg: #2e2e33;
+  --status-draft-fg: #a1a1aa;
+  --status-draft-line: #52525b;
+  --status-scheduled-bg: #2e2450;
+  --status-scheduled-fg: #bfa9ec;
+  --status-scheduled-line: #6a4fae;
+  --status-sent-bg: #14532d;
+  --status-sent-fg: #86efac;
+  --status-sent-line: #15803d;
+  --status-sending-bg: #172554;
+  --status-sending-fg: #60a5fa;
+  --status-sending-line: #2563eb;
+  /* The action accent, dark — shared with the reader surface's dark --k-accent
+       (lib/page.ts) so the two surfaces' blue agrees. Its most demanding use is
+       Secondary text (--accent on the soft fill): because the text is a light blue, a
+       lighter fill *loses* contrast, so --accent-soft is a low-opacity (darker) tint,
+       holding Secondary at ~4.7:1 (WCAG AA). Primary keeps huge contrast (dark
+       --accent-on text on the accent fill). */
+  --accent: oklch(0.94 0.004 90);
+  --accent-on: oklch(0.16 0.008 60);
+  --accent-soft: oklch(0.28 0.008 60);
+  --syntax-bg: #1a1a1d;
+  --syntax-fg: #cfcfd6;
+  --syntax-gutter: #5a5a63;
+  --syntax-tag: #c4a7ff;
+  --syntax-string: #7fd9b0;
+  --syntax-property: #86b6ff;
+  --syntax-selector: #f0a86a;
+  --syntax-number: #f0a86a;
+  --syntax-at-rule: #e79ae0;
+  --syntax-punctuation: #6a6a72;
+  --syntax-variable: #a9bbf2;
+  --syntax-variable-bg: rgba(120, 150, 240, 0.18);
+  /* Post editor minimal scheme — near-black/saturated hues lift to legible
+       tints on the dark well; the heading crimson becomes a rose, emphasis a lighter pink. */
+  --syntax-heading: #fb7185;
+  --syntax-emphasis: #f472b6;
+  --syntax-quote: #f0a86a;
+  --syntax-code-bg: #26262b;
+  --code-inline-fg: #f07a7a;
+  --method-get: #4ade80;
+  --method-post: #60a5fa;
+  --method-put: #fbbf24;
+  --method-delete: #fca5a5;
+  --sunken: #1b1b1f;
+  --line-soft: #3a3a41;
+  --chip: #2a2a30;
+}
+
+* {
+  box-sizing: border-box;
+}
+[hidden] {
+  /* biome-ignore lint/complexity/noImportantStyles: the hidden attribute must win over any component's display rule */
+  display: none !important;
+}
+body {
+  margin: 0;
+  font-family: var(--font);
+  color: var(--fg);
+  background: var(--card);
+}
+a {
+  color: inherit;
+}
+
+/* one deliberate focus ring, everywhere */
+:where(button, a, input, textarea, select, summary, .ctab, .tb, .brand, .info):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 0;
+}
+
+h1 {
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 0 0 4px;
+}
+h2 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 26px 0 10px;
+}
+
+/* --- app shell: a left sidebar (publication workspace) beside the routed view.
+   Top→bottom: brand → View publication → primary nav; then, at the foot, the
+   account chip and the tool footer. The editor and the signed-out wall hide the
+   sidebar for the full width. Admin→public links are fine here; the reverse is
+   never emitted (SPEC §10). --- */
+.layout {
+  background: var(--bg);
+  display: flex;
+  align-items: stretch;
+  min-height: 100vh;
+}
+/* The sidebar is two parts so the divider never floats: the outer column stretches to
+   the full page height (it owns the background + right border), and the inner wrapper
+   is the sticky, viewport-tall part that actually holds and pins the content. */
+.sidebar {
+  flex: 0 0 240px;
+  /* Hold the 240px basis: without this a flex item's min-width:auto floor lets a
+     long brand name/tagline push the column wider than its basis (the ellipsis on
+     .brand-name/.brand-tagline can't engage until the column itself stops growing). */
+  min-width: 0;
+  background: var(--bg);
+  border-right: 1px solid var(--line);
+}
+.sidebar-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 18px 14px;
+  position: sticky;
+  top: 0;
+  /* dvh tracks the actual visible viewport, so the foot pins to the real bottom; even
+     where it can't (old browsers, odd emulation) the outer column still runs full
+     height, so the divider never ends short. */
+  height: 100dvh;
+  overflow-y: auto;
+}
+body.editor-mode .sidebar,
+body.signed-out .sidebar,
+body.tool-mode .sidebar {
+  display: none;
+}
+/* While the window is being resized, kill the sidebar's own transitions so crossing a
+   breakpoint (e.g. rail → mobile drawer) snaps instead of animating the slide — app.js
+   adds this class during a resize and drops it once it settles. The drawer's open/close
+   animation is unaffected because that never happens mid-resize. */
+body.nav-resizing .sidebar {
+  transition: none;
+}
+
+/* Reference room: the "learn / set up / integrate" area (Docs · API).
+   In tool mode the publication sidebar is hidden and #app goes full-width; the room
+   renders its own top bar + two-column grid, so the "← Dashboard" block is exactly
+   the sidebar's width and sits directly above the contents rail. On mobile the whole
+   thing collapses to one bar row over a stacked body — see the ≤720px block below. */
+.room {
+  /* Matches the publication sidebar's width, so the room's "← Dashboard" block and its
+     contents rail line up exactly where the sidebar was. Keep the two in step. */
+  --rail: 240px;
+  /* The bar's height (border included), at every width. Everything that has to clear the
+     sticky bar — the pinned rail, the body's minimum height, the doc/API anchors'
+     scroll-margin and the scroll-spy line in app.js — is sized from this one number. */
+  --bar-h: 54px;
+}
+.room-bar {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-header);
+  display: grid;
+  grid-template-columns: var(--rail) 1fr;
+  align-items: stretch;
+  min-height: var(--bar-h);
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+.room-back {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 22px;
+  border-right: 1px solid var(--line);
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 14px;
+}
+.room-back:hover {
+  color: var(--fg);
+}
+.room-nav {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 0 16px 0 32px;
+  min-width: 0;
+}
+/* The wordmark is the way into the room's home (the docs index), so it's a link — but it
+   reads as identity, not a nav item: full-strength --fg, no underline. */
+.room-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg);
+  font-weight: 600;
+  font-size: 15px;
+  flex: none;
+  text-decoration: none;
+}
+.room-brand svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+  display: block;
+}
+.room-switch {
+  display: flex;
+  gap: 4px;
+}
+.room-switch a {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  text-decoration: none;
+  color: var(--muted);
+  font-size: 14px;
+  padding: 6px 12px;
+  border-radius: 0;
+}
+.room-switch a:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+.room-switch a[aria-current="page"] {
+  color: var(--fg);
+  font-weight: 600;
+  background: var(--hover);
+}
+/* A plain ✕ pinned to the far right of the bar — a second, always-visible way back to
+   the publication (the rail-width "← Dashboard" on the left is the first). */
+.room-close {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 0;
+  flex: none;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 16px;
+  line-height: 1;
+}
+.room-close:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+.room-body {
+  display: grid;
+  grid-template-columns: var(--rail) 1fr;
+  align-items: stretch;
+  /* The rail runs the full height of the content (and at least the viewport), so its
+     divider never stops partway down. */
+  min-height: calc(100vh - var(--bar-h));
+}
+.room-body.norail {
+  grid-template-columns: 1fr;
+}
+.room-rail {
+  border-right: 1px solid var(--line);
+}
+/* The contents themselves stay pinned in view while the rail column is full height. Exactly
+   viewport-tall (min = max), so the build stamp can hang at its bottom-left corner; a
+   contents list taller than that scrolls inside, stamp last. */
+.rail-inner {
+  position: sticky;
+  top: var(--bar-h);
+  min-height: calc(100vh - var(--bar-h));
+  max-height: calc(100vh - var(--bar-h));
+  overflow-y: auto;
+  padding: 20px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.room-main {
+  min-width: 0;
+  padding: 28px 32px 80px;
+}
+/* The running build (SPEC §9), quiet metadata in the rail's bottom-left corner on every
+   surface — version → release, sha → commit (its links inherit this muted color; see
+   .build-link). margin-top: auto floats it to the foot of the viewport-tall rail, clear of
+   whatever the rail holds, with no rule of its own. */
+.rail-foot {
+  margin-top: auto;
+  padding: 24px 10px 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* The same stamp as the room's foot — mobile only, where the rail isn't a column any more
+   (roomShell renders both from one source; the ≤720px block swaps which one shows). */
+.room-foot {
+  display: none;
+  padding: 14px 16px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+/* The first link's separator padding would indent the stamp 4px past the text edge. */
+.rail-foot .build-link:first-child,
+.room-foot .build-link:first-child {
+  padding-left: 0;
+}
+
+/* The docs index (#/docs): an intro over the guide's sections, the main path numbered as
+   steps. Single reading column, the same measure as a doc page and the API reference. */
+.docs-index {
+  max-width: 720px;
+}
+.eyebrow {
+  font-size: 12px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+  margin: 0 0 10px;
+}
+/* The tab per doc set under the docs header: an underlined strip, the current set in the
+   foreground over an accent rule, the way tabs read as switchable. Links, since each set's
+   index is its own address. */
+.docs-tabs {
+  display: flex;
+  gap: 24px;
+  border-bottom: 1px solid var(--line);
+  margin: 0 0 20px;
+}
+.docs-tabs a {
+  padding: 8px 0 10px;
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.docs-tabs a:hover {
+  color: var(--fg);
+}
+.docs-tabs a[aria-current="page"] {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+/* A doc page's set, in the eyebrow over its title: the link back to that set's index. */
+.doc .doc-set a {
+  color: var(--muted);
+  text-decoration: none;
+}
+.doc .doc-set a:hover {
+  color: var(--accent);
+}
+.docs-index > h1 {
+  font-size: 28px;
+  line-height: 1.15;
+  margin: 0 0 12px;
+}
+.docs-index-intro {
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.6;
+  margin: 0 0 24px;
+  max-width: 62ch;
+}
+/* A section: its title over its rows. The first sits right under the intro; the rest get
+   room above, so each reads as its own group. */
+.doc-section + .doc-section {
+  margin-top: 36px;
+}
+.doc-section-t {
+  font-size: 17px;
+  line-height: 1.3;
+  margin: 0 0 6px;
+}
+/* The README's paragraph under a section heading, and its intro under the title: Markdown
+   rendered to paragraphs, so their own margins are reset to the block's. */
+.doc-section-blurb {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 0 0 12px;
+}
+.doc-section-blurb p,
+.docs-index-intro p {
+  margin: 0;
+}
+/* One row per doc: a zero-padded number (main path only), the title with a → that nudges on hover, and the
+   doc's own first-paragraph blurb. Hairline rules, no cards. */
+.doc-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--line);
+}
+.doc-cards li {
+  margin: 0;
+}
+.doc-card {
+  display: flex;
+  gap: 18px;
+  padding: 18px 6px;
+  border-bottom: 1px solid var(--line);
+  text-decoration: none;
+  color: var(--fg);
+}
+.doc-card:hover {
+  background: var(--hover);
+}
+.doc-card-n {
+  flex: 0 0 auto;
+  min-width: 22px;
+  padding-top: 2px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--muted);
+}
+.doc-card-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.doc-card-t {
+  font-size: 16px;
+  font-weight: 650;
+}
+.doc-card-go {
+  display: inline-block;
+  color: var(--muted);
+  transition: transform 0.12s ease;
+}
+.doc-card:hover .doc-card-go {
+  transform: translateX(3px);
+  color: var(--fg);
+}
+.doc-card-d {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+/* A doc page's title row: the fragment's own H1 with the compact Previous / Next set on
+   the same line, hanging off its right edge (renderDocPage wraps the two). The pager is
+   centred on the H1's first line box — not its baseline, which would drop the small links
+   toward the bottom of the big line — so a title that wraps keeps the links up by its
+   first line. Plain muted links; the titled pager lives at the article foot. */
+.doc-head {
+  /* The H1's line box (its --h1-size at this line-height). The pager takes the same height
+     so the two centre together. */
+  --title-line: calc(var(--h1-size) * 1.2);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  margin: 0 0 10px;
+}
+.doc-head h1 {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  line-height: 1.2;
+}
+.doc-topnav {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: var(--title-line);
+  gap: 16px;
+}
+/* Inside .doc, so scope past the in-content `.doc a` style (blue + underline). */
+.doc .doc-topnav a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 14px;
+  white-space: nowrap;
+}
+.doc .doc-topnav a:hover {
+  color: var(--fg);
+}
+/* The docs-index rail's out-links (the project site, the source repo, its license). One
+   per line, muted, brightening on hover. The 10px left padding lines their left edge up
+   with the "LETTRE" label above them (.toc-label). */
+.rail-link {
+  display: block;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 14px;
+  padding: 5px 10px;
+}
+.rail-link:hover {
+  color: var(--fg);
+}
+/* The short label is for the mobile chip row only. */
+.rail-link-short {
+  display: none;
+}
+.pub-note {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 10px 2px 0;
+  line-height: 1.5;
+}
+/* The connected state: an inline status line reusing the --ok feedback scale (DESIGN §8),
+   not a notification — a quiet confirmation the agent has edited here. */
+.conn-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--fg);
+  margin: 2px 2px 0;
+  line-height: 1.5;
+}
+.conn-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok-fg);
+}
+/* The API-access card's links, both states: stacked, each on its own line, at one weight —
+   none is an action (connecting Claude happens outside the app), so none leads. Each is led
+   by a glyph for what it is (article: the guide; code: the reference), which says the kind
+   where the trailing arrow says the direction; the glyph takes the link's own color. */
+.pub-links {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pub-links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.pub-links a svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+  flex: 0 0 auto;
+}
+.pub-note a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.pub-note a:hover {
+  text-decoration: underline;
+}
+/* Mobile nav drawer trigger (hidden on desktop and in editor / room modes). */
+.nav-toggle {
+  display: none;
+}
+.nav-scrim {
+  display: none;
+}
+
+/* Reserve the width of the active (600-weight) label so toggling weight never
+   reflows a horizontal nav (the same trick the old top bar used). */
+.room-switch a::after {
+  content: attr(data-text);
+  height: 0;
+  font-weight: 600;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+.sidebar-top {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sidebar-foot {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 12px;
+}
+
+/* Brand → the dashboard home. Logo tile (publication logo, or a neutral initial
+   placeholder) + name over an optional one-line tagline. */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  color: var(--fg);
+  padding: 6px 8px;
+  border-radius: 0;
+}
+.brand:hover {
+  background: var(--hover);
+}
+.brand-logo {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border-radius: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  font-weight: 700;
+  font-size: 17px;
+  line-height: 1;
+}
+.brand-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.brand-logo-placeholder {
+  background: var(--ink);
+  color: var(--ink-on);
+}
+.brand-logo-placeholder svg {
+  width: 24px;
+  height: 24px;
+}
+.brand-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.brand-name {
+  font-weight: 650;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.brand-tagline {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* View publication ↗ — sits directly under the brand; opens the public archive in
+   a new tab. Not a nav item (admin→public is one-directional, SPEC §10). */
+.view-pub {
+  display: inline-block;
+  align-self: flex-start;
+  margin: 0 8px 6px;
+  font-size: 12.5px;
+  color: var(--muted);
+  text-decoration: none;
+}
+.view-pub:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+
+/* Primary nav — one flat vertical list of peers. */
+.nav-primary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+}
+.nav-primary a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  color: var(--muted);
+  font-size: 14px;
+  padding: 8px 10px;
+  border-radius: 0;
+}
+/* Nav marks. Inherit the link color (muted → fg on hover / active) via currentColor.
+   The view-pub and sign-out marks only surface in the collapsed rail. */
+.nav-icon {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+}
+.view-pub-icon,
+.signout-icon {
+  display: none;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+}
+.nav-primary a:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+.nav-primary a[aria-current="page"] {
+  color: var(--fg);
+  font-weight: 600;
+  background: var(--hover);
+}
+
+/* Account chip at the foot (reuses renderIdentity). */
+.identity {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  font-size: 13px;
+  padding: 0 8px;
+}
+.identity .who {
+  color: var(--muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.identity .who.dev {
+  font-style: italic;
+}
+.identity a.ghost {
+  font-size: 13px;
+  color: var(--muted);
+  text-decoration: none;
+}
+.identity a.ghost:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+
+/* Tool footer: the Lettre mark, Docs, and API — all on one line (→ authed in-app
+   views, SPEC §10). */
+.tool-foot {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  /* Extra bottom clearance so Chrome's link-hover status bar doesn't overlap it. */
+  padding-bottom: 12px;
+  padding-left: 8px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.powered {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  text-decoration: none;
+  color: var(--muted);
+  font-size: 14px;
+  padding: 2px 0;
+}
+.powered:hover {
+  color: var(--fg);
+}
+.powered-label {
+  white-space: nowrap;
+}
+.powered-by {
+  font-size: 11px;
+  font-weight: 400;
+}
+.lettre-mark {
+  width: 16px;
+  height: 16px;
+  background-color: currentColor;
+  mask: url("/lettre-icon.svg") center / contain no-repeat;
+  display: block;
+  flex: 0 0 auto;
+}
+
+/* The version → tag and sha → commit links in the build stamp take the surrounding muted
+   color and only brighten + underline on hover, so they read as metadata, not calls to
+   action. (The stamp itself sits under the rail's contents — see .rail-foot.) */
+.build-link {
+  color: inherit;
+  text-decoration: none;
+  /* A little breathing room on each side so the version and sha aren't cramped against
+     their · separator. */
+  padding: 0 4px;
+}
+.build-link:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+
+/* Collapse ↔ expand chevron, pushed to the right end of the footer row (opposite the
+   Lettre mark). Icon-only; overrides the base button chrome. Hidden on mobile (the
+   overlay is always full) — see the mobile block. */
+.nav-collapse {
+  margin-left: auto;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.nav-collapse:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+.nav-collapse-icon {
+  /* A chevron only paints part of its box, so it's sized up past the 18px nav icons to
+     read as an equal-weight mark. */
+  width: 22px;
+  height: 22px;
+}
+
+.auth-wall {
+  max-width: 420px;
+  margin: 64px auto;
+  text-align: center;
+}
+.auth-wall h2 {
+  margin: 0 0 8px;
+}
+.auth-wall button {
+  margin-top: 12px;
+}
+/* The refused-configuration wall says more than the sign-in wall, so it reads as text: left
+   aligned, a little wider, with the variable and the server's words set apart. The locked
+   editor, before Access is set up, reads the same way. */
+.config-wall,
+.access-wall {
+  max-width: 560px;
+  text-align: left;
+}
+/* Text for a screen reader alone, such as a link's "(opens in a new tab)" beside a ↗ that is
+   hidden from it. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+.config-wall h2:focus,
+.access-wall h2:focus {
+  outline: none;
+}
+.config-wall-problem {
+  padding: 10px 12px;
+  border-radius: 0;
+  background: var(--bg);
+  overflow-wrap: anywhere;
+}
+
+/* The routed view. Capped for readability and centered in the space beside the
+   sidebar; the editor gets a slightly narrower canvas to match its old width. */
+.content {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 28px 32px 72px;
+}
+body.editor-mode .content {
+  max-width: 900px;
+}
+/* The reference room provides its own full-width bar + grid, so #app spans the
+   whole area (no centering/padding) when a room is open. */
+body.tool-mode .content {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* --- Collapsed icon rail. Driven by data-nav="rail" on <html> (set from the viewport
+   width and the collapse toggle's override for this load — see client/shell.ts and the
+   <head> guard in index.html), so the collapse toggle can pin it at any width in range. The rail is the
+   default across the tablet range and small desktops; the nav keeps its one-click
+   reach, labels move to hover/focus tooltips, and the secondary chrome (brand text,
+   account, tool footer) folds down to its marks. The whole block is gated at ≥540 so a
+   stray data-nav can never fight the mobile drawer (<540) mid-resize — below that the
+   overlay rules take over. --- */
+@media (min-width: 540px) {
+  [data-nav="rail"] .sidebar {
+    flex-basis: 64px;
+  }
+  [data-nav="rail"] .sidebar-inner {
+    padding: 18px 8px;
+    /* Lift the rail's stacking context above .content and let the hover tooltips escape
+     the 64px column; the collapsed contents never scroll, so the clip that overflow-y
+     would otherwise force isn't needed here. The side rail sits on the header rung. */
+    overflow: visible;
+    z-index: var(--z-header);
+  }
+
+  /* Brand → the logo tile only; the name/tagline folds away. */
+  [data-nav="rail"] .brand {
+    justify-content: center;
+    padding: 6px;
+  }
+  [data-nav="rail"] .brand-meta {
+    display: none;
+  }
+
+  /* View publication → a centered arrow mark (the text rides out as a tooltip). Given
+   the same padded, hover-lit box as a nav item so it reads as a peer control. */
+  [data-nav="rail"] .view-pub {
+    position: relative;
+    display: flex;
+    align-self: stretch;
+    justify-content: center;
+    padding: 10px;
+    margin: 0 0 4px;
+    border-radius: 0;
+  }
+  [data-nav="rail"] .view-pub:hover {
+    background: var(--hover);
+  }
+  [data-nav="rail"] .view-pub-icon {
+    display: block;
+    width: 20px;
+    height: 20px;
+  }
+
+  /* Primary nav → centered icons. */
+  [data-nav="rail"] .nav-primary a {
+    position: relative;
+    justify-content: center;
+    padding: 10px;
+  }
+
+  /* Labels ride out to the right as tooltips, kept in the DOM (and the accessible name)
+   via opacity + pointer-events rather than display:none. Note there is NO transition
+   at rest: collapsing (toggle) or crossing a breakpoint snaps a label straight to
+   hidden instead of animating it floating across the content. The fade lives on the
+   hover state alone, so only a genuine hover eases one in. */
+  [data-nav="rail"] .nav-primary a > .nav-label,
+  [data-nav="rail"] .view-pub > .view-pub-label {
+    position: absolute;
+    left: calc(100% + 10px);
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: var(--z-menu);
+    padding: 5px 9px;
+    border-radius: 0;
+    background: var(--fg);
+    color: var(--bg);
+    font-size: 12.5px;
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+    box-shadow: var(--shadow, 0 4px 16px rgba(0, 0, 0, 0.16));
+    opacity: 0;
+    pointer-events: none;
+  }
+  [data-nav="rail"] .nav-primary a:hover > .nav-label,
+  [data-nav="rail"] .nav-primary a:focus-visible > .nav-label,
+  [data-nav="rail"] .view-pub:hover > .view-pub-label,
+  [data-nav="rail"] .view-pub:focus-visible > .view-pub-label {
+    opacity: 1;
+    transition: opacity 0.12s ease;
+  }
+
+  /* Foot → marks only: the account collapses to a sign-out icon, the tool footer to the
+   Lettre mark. Docs / API drop out here (still reachable at full width and from
+   inside the reference room). */
+  [data-nav="rail"] .identity {
+    align-items: center;
+    padding: 0;
+  }
+  [data-nav="rail"] .identity .who {
+    display: none;
+  }
+  [data-nav="rail"] .identity a.ghost {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px;
+    border-radius: 0;
+  }
+  [data-nav="rail"] .identity a.ghost:hover {
+    background: var(--hover);
+    color: var(--fg);
+  }
+  [data-nav="rail"] .signout-icon {
+    display: block;
+  }
+  [data-nav="rail"] .signout-label {
+    display: none;
+  }
+  /* Foot stacks: Lettre mark, then the expand chevron, both centered. The gap is
+     opened up so the pair breathes like the padded nav icons above rather than reading
+     cramped. */
+  [data-nav="rail"] .tool-foot {
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    padding-left: 0;
+  }
+  [data-nav="rail"] .powered {
+    gap: 0;
+    padding: 4px;
+  }
+  [data-nav="rail"] .powered > .powered-label {
+    display: none;
+  }
+  [data-nav="rail"] .nav-collapse {
+    margin-left: 0;
+  }
+  [data-nav="rail"] .nav-collapse-icon {
+    transform: rotate(180deg);
+  }
+}
+
+/* Mobile (<540px): the icon rail gives way — the sidebar leaves the flow and becomes
+   an off-canvas drawer opened by the hamburger, carrying the full brand + labels. */
+@media (max-width: 539px) {
+  /* The publication sidebar becomes an off-canvas drawer opened by the hamburger
+     (no bottom tabs — the drawer carries every view). The footer collapse chevron has
+     no role here: the overlay always shows full labels. */
+  .nav-collapse {
+    display: none;
+  }
+  .nav-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    z-index: var(--z-menu);
+    width: 40px;
+    height: 40px;
+    /* Reset the base button's padding (8px 14px): with box-sizing:border-box it
+       would squeeze the 40px box down to a ~10px content area and shrink the icon. */
+    padding: 0;
+    border-radius: 0;
+    background: var(--card);
+    border: 1px solid var(--line);
+    color: var(--fg);
+    box-shadow: var(--shadow, 0 4px 16px rgba(0, 0, 0, 0.12));
+    cursor: pointer;
+  }
+  .nav-toggle svg {
+    width: 24px;
+    height: 24px;
+    flex: none;
+    fill: currentColor;
+  }
+  /* No hamburger while the sidebar is already hidden (editor / reference room). */
+  body.editor-mode .nav-toggle,
+  body.tool-mode .nav-toggle,
+  body.signed-out .nav-toggle {
+    display: none;
+  }
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100vh;
+    width: min(280px, 82vw);
+    /* The drawer, its scrim and the hamburger share the menu rung; DOM order
+       (toggle → scrim → drawer) keeps the drawer painting above the scrim. */
+    z-index: var(--z-menu);
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+  }
+  body.nav-open .sidebar {
+    transform: none;
+  }
+  body.nav-open .nav-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-menu);
+    background: rgba(0, 0, 0, 0.45);
+  }
+  .content {
+    padding: 56px 16px 56px;
+  }
+  body.tool-mode .content {
+    padding: 0;
+  }
+}
+
+/* biome-ignore lint/style/noDescendingSpecificity: specificity (not source order) decides the cascade; base rule grouped here intentionally */
+button {
+  font-family: inherit;
+  font-size: 14px;
+  padding: 8px 14px;
+  border-radius: 0;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--fg);
+  cursor: pointer;
+  transition:
+    filter 0.12s,
+    border-color 0.12s,
+    background 0.12s;
+}
+button:hover {
+  border-color: var(--muted);
+}
+button:active {
+  transform: translateY(0.5px);
+}
+/* --- Buttons: five roles (DESIGN §7), chosen by importance and consequence, one
+   class each. The bare `button` above is the neutral default (Ghost's card-filled
+   end); the classes below step up to Primary / Secondary or down to the quiet Ghost,
+   plus Danger and the square Icon. Exactly one solid brand-blue action — Primary — is
+   in front of the writer at a time, and it is --accent, never the near-black neutral
+   (now the --ink text token, never a button fill). --- */
+
+/* One box height across the label roles, so a row that mixes them (the editor's
+   Save draft / Send test email / Schedule, a modal's Cancel + confirm) aligns:
+   roles differ by treatment — fill, weight, font-size — never by height (DESIGN §7).
+   A smaller-font role (Secondary, Ghost) grows to this floor with its label centered
+   rather than sitting a few pixels short of the Primary beside it. The bare `button`
+   default already meets it; the square Icon role and the segmented toggle Control keep
+   their own sizing and are deliberately excluded. */
+button.primary,
+button.secondary,
+button.ghost,
+a.ghost.btn,
+button.danger,
+button.danger-subtle {
+  min-height: 35px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Primary — the single most-important action of a view (one per view). */
+button.primary {
+  background: var(--accent);
+  color: var(--accent-on);
+  border-color: var(--accent);
+  font-weight: 500;
+}
+button.primary:hover {
+  filter: brightness(1.08);
+}
+button.primary:active {
+  filter: brightness(0.94);
+}
+
+/* Secondary — an important standing action that isn't *the* action (e.g. Send test
+   email beside a Save): soft accent fill, accent text, accent-tinted border. */
+button.secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line-soft));
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 7px 12px;
+  border-radius: 0;
+}
+button.secondary:hover {
+  border-color: var(--accent);
+}
+
+/* Ghost — the quiet neutral role: back, cancel, a menu trigger, a pager step, a copy
+   control. The default for anything not asking for attention; absorbs the old
+   .ghost-btn / .set-btn-ghost idioms. */
+button.ghost,
+a.ghost.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--muted);
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 0;
+}
+button.ghost:hover,
+a.ghost.btn:hover {
+  color: var(--fg);
+  border-color: var(--muted);
+}
+/* A link that wears Ghost (`a.ghost.btn`: Web version ↗ goes to a page rather than
+   acting on one), with a link's own underline and transition taken off so it reads as
+   the buttons beside it. The plain `a.ghost` is the sidebar's text-link Sign out. */
+a.ghost.btn {
+  text-decoration: none;
+  line-height: normal;
+  transition: border-color 0.12s;
+}
+/* A copy control flashes green (--ok) once the clipboard write lands. */
+button.ghost.copied {
+  color: var(--ok-fg);
+  border-color: color-mix(in srgb, var(--ok-fg) 40%, var(--line-soft));
+}
+/* An icon inside a Secondary/Ghost label button (Send test, Copy). */
+button.secondary svg,
+button.ghost svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+/* Icon — a square, icon-only control where a label would be noise (a ⋯ trigger, a
+   toolbar glyph). Inherits Ghost's neutral treatment; always carries an aria-label. */
+button.icon {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 8px;
+  border-radius: 0;
+}
+button.icon:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+button.danger {
+  background: var(--danger-fg);
+  color: var(--danger-on);
+  border-color: var(--danger-fg);
+}
+button.danger:hover {
+  filter: brightness(1.08);
+}
+/* Subtle danger: a quiet grey outline at rest that reveals the destructive color
+   — red text and border — only on hover. Used beside a clickable row (Sends →
+   Scheduled) so Cancel doesn't shout over the row it sits on. */
+button.danger-subtle {
+  background: transparent;
+  color: var(--muted);
+  border-color: var(--line);
+  transition:
+    color 0.12s,
+    border-color 0.12s,
+    background 0.12s;
+}
+button.danger-subtle:hover {
+  color: var(--danger-fg);
+  border-color: var(--danger-fg);
+  background: color-mix(in srgb, var(--danger-fg) 8%, transparent);
+}
+button.danger-subtle:active {
+  background: color-mix(in srgb, var(--danger-fg) 14%, transparent);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  filter: none;
+}
+/* Unavailable but still clickable, so the click can point at the way out (the editor's
+   Save draft while the out-of-date banner is up). Reads as disabled. */
+button[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+  font-size: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  width: 100%;
+  background: var(--card);
+  color: var(--fg);
+}
+/* Replace the native select caret with one inset from the border (the native caret sat
+   flush against the edge). Scoped to select so inputs/textareas keep their own chrome. */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 32px;
+  background-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2352525b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='m6 9 6 6 6-6'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 16px;
+}
+:root[data-theme="dark"] select {
+  background-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='m6 9 6 6 6-6'/></svg>");
+}
+label {
+  display: block;
+  font-size: 14px;
+  color: var(--muted);
+  margin: 14px 0 8px;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.spread {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.muted {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  padding: 16px;
+  margin-bottom: 14px;
+}
+/* A card that opens on click (Sends → Scheduled → the post). Mirrors
+   tr.clickable; the subject link and the Cancel button opt out via the guard. */
+.card.clickable {
+  cursor: pointer;
+  transition: border-color 0.12s;
+}
+.card.clickable:hover {
+  border-color: var(--muted);
+}
+.card-link {
+  text-decoration: none;
+}
+.card-link:hover {
+  text-decoration: underline;
+}
+
+.error {
+  color: var(--danger-fg);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-line);
+  border-radius: 0;
+  padding: 12px 14px;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+table {
+  width: 100%;
+  /* Separate (not collapse) is load-bearing: this rule is a card — an outer border,
+     a 10px radius, and `overflow:hidden` to clip the corners. Under `border-collapse:
+     collapse` the browser silently drops BOTH the radius and the outer border (the
+     collapsed border is clipped away by overflow:hidden), so every table renders
+     borderless with square corners. `border-spacing:0` keeps the cells flush; row
+     rules are carried by each cell's `border-bottom` below. A real cell grid that
+     needs collapse opts out explicitly — see `.doc table`. */
+  border-collapse: separate;
+  border-spacing: 0;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  overflow: hidden;
+}
+th,
+td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+}
+th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 12px;
+}
+td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* A list's Delivered cell carries its delivery-failure note (complained / bounced / unsent) as a
+   smaller line under the count, never inline: inline it either wraps a fixed-width
+   numeric column several lines deep or, in an auto-width table, widens the column at the
+   subject's expense. Stacked, a bad send adds one line to its row and the column stays a
+   number's width. Each kind is one unbreakable unit, so a wrap lands between kinds. */
+.delivered-note {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.delivered-kind {
+  white-space: nowrap;
+}
+tr:last-child td {
+  border-bottom: 0;
+}
+tr.clickable {
+  cursor: pointer;
+}
+tr.clickable:hover {
+  background: var(--hover);
+}
+td a {
+  text-decoration: none;
+  font-weight: 500;
+}
+/* biome-ignore lint/style/noDescendingSpecificity: specificity (not source order) decides the cascade; hover rule grouped with its base */
+td a:hover {
+  text-decoration: underline;
+}
+
+/* A badge is a plain label, so it shows the default cursor rather than the text one. In a
+   row or card that opens on click it keeps the container's pointer. */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 0;
+  font-size: 12px;
+  border: 1px solid var(--line);
+  cursor: default;
+}
+.clickable .badge {
+  cursor: inherit;
+}
+.badge.draft {
+  background: var(--status-draft-bg);
+  color: var(--status-draft-fg);
+  border-color: var(--status-draft-line);
+}
+.badge.scheduled {
+  background: var(--status-scheduled-bg);
+  color: var(--status-scheduled-fg);
+  border-color: var(--status-scheduled-line);
+}
+.badge.sent {
+  background: var(--status-sent-bg);
+  color: var(--status-sent-fg);
+  border-color: var(--status-sent-line);
+}
+.badge.sending {
+  background: var(--status-sending-bg);
+  color: var(--status-sending-fg);
+  border-color: var(--status-sending-line);
+}
+/* A list's title with its Email only mark (sends/progress.ts): the title wraps within its room
+   and the mark, an envelope and muted words, stays whole on the title's line, so it never drops
+   onto a line of its own. */
+.title-with-label {
+  display: flex;
+  /* Centered, not on a baseline: the mark's text is smaller and led by an icon, and only
+     their centers line up with the title's. */
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.title-with-label .title-text {
+  min-width: 0;
+}
+/* Where a table's columns are fixed, a long title ends in an ellipsis, so the row stays one
+   line tall; the whole title is a click away in the post. */
+.list-table .title-with-label .title-text,
+.dash-drafts .title-with-label .title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.email-only-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.email-only-mark svg {
+  width: 13px;
+  height: 13px;
+}
+/* Subscriber consent states borrow a hue that matches the state's meaning: confirmed →
+   the sent green, unsubscribed → the draft grey, suppressed → danger red (below). Pending
+   awaits double-opt-in — a waiting/attention state — so it takes the amber `warn` scale,
+   NOT `--status-sending`: the send "sending" badge is blue (DESIGN §8), and a pending subscriber
+   must never read as a send in flight. (The two coincided only while `--status-sending` was
+   amber; when it went blue for the dispatch treatment, this pill must stay amber.) */
+.badge.confirmed {
+  background: var(--status-sent-bg);
+  color: var(--status-sent-fg);
+  border-color: var(--status-sent-line);
+}
+.badge.pending {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  border-color: var(--warn-line);
+}
+.badge.unsubscribed {
+  background: var(--status-draft-bg);
+  color: var(--status-draft-fg);
+  border-color: var(--status-draft-line);
+}
+.badge.suppressed {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  border-color: var(--danger-line);
+}
+/* A suppressed address's consent status, kept but not in effect, takes the unsubscribed
+   grey: grey is "not mailed", whatever the label says, so a confirmed-but-suppressed row
+   never reads as one that is mailed. The red flag says why. It overrides the status's own
+   hue (.badge.confirmed and the rest, same specificity) by coming after them, so keep it
+   below them. */
+.badge.held {
+  background: var(--status-draft-bg);
+  color: var(--status-draft-fg);
+  border-color: var(--status-draft-line);
+}
+/* Suppression is an overlay on the address, not a consent status, so it rides next to
+   the email rather than in the Status column — sized down to read as secondary. */
+.row-flag {
+  margin-left: 8px;
+  padding: 1px 7px;
+  font-size: 11px;
+  vertical-align: middle;
+}
+
+/* The Subscribers summary: the counts, with the Legend toggle at the card's right edge
+   (at the end of the counts' last line when they wrap), and the legend opening below
+   across the card. The legend is in the page's own colors (not an inverted tooltip),
+   each pill drawn as the list draws it beside its definition. */
+.sub-summary-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+/* The negative margin lines the first count's text up with the card's edge. */
+#subCounts {
+  gap: 10px 12px;
+  margin-left: -8px;
+}
+/* Each count is a filter (DESIGN §3): it reads as the plain count it was, and shows on
+   hover that it can be chosen. The chosen one takes the Secondary palette of a pressed
+   toggle, since it switches what you're looking at and commits nothing. */
+.sub-count {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+  padding: 4px 8px;
+  margin: -4px 0;
+  border-radius: 0;
+}
+.sub-count:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+.sub-count[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+/* Forced colors drop the tint, so the chosen count keeps an outline there. */
+@media (forced-colors: active) {
+  .sub-count[aria-pressed="true"] {
+    outline: 1px solid ButtonText;
+  }
+}
+/* The padding and equal negative margin give a 24px target without moving the label. */
+.sub-legend-toggle {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  margin: -4px -6px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  border-radius: 0;
+}
+.sub-legend-toggle:hover {
+  color: var(--fg);
+}
+.sub-legend-toggle::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin-top: -3px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+}
+.sub-legend-toggle[aria-expanded="true"]::after {
+  margin-top: 3px;
+  transform: rotate(-135deg);
+}
+/* One grid for every group, each list a subgrid, so every definition starts at the same
+   edge. Each group is named by an h2 in the app's label style, and the panel has no title of
+   its own: the Legend toggle already names it. Its headings are a step smaller and more
+   widely tracked than the base label, and set apart by space alone (a group's break, 28px,
+   is three and a half rows'), so the one rule in the panel is the divider under the counts.
+   A paragraph keeps the app's 1rem beneath it. The panel carries the divider across the
+   card; its body is the container that caps the line length, once, for everything in it. */
+.sub-legend {
+  margin-top: 14px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.sub-legend-body {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 16px;
+  max-width: 88ch;
+}
+.sub-legend h2 {
+  grid-column: 1 / -1;
+  margin: 28px 0 10px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+}
+.sub-legend h2:first-child {
+  margin-top: 0;
+}
+.sub-legend dl {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  row-gap: 8px;
+  align-items: baseline;
+  margin: 0;
+}
+.sub-legend dd {
+  margin: 0;
+}
+/* An act's name is a term, not a heading: lighter than bold, so it doesn't outweigh the
+   pills in the column beside it. */
+.sub-legend-act {
+  font-weight: 500;
+}
+.sub-legend p {
+  grid-column: 1 / -1;
+  margin: 0 0 1rem;
+  color: var(--muted);
+}
+
+/* list views (posts / subscribers / sends): search on the left, filters pinned right */
+.list-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 12px 0 16px;
+}
+.list-toolbar .lt-search {
+  flex: 1 1 220px;
+  max-width: 340px;
+}
+.list-toolbar .lt-filters {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+.list-toolbar select {
+  width: auto;
+}
+/* "Suppressed" toggle: a flag beside the status filter, not inside it. margin:0 resets
+   the global `label` margin (14px 0 8px) — that asymmetric margin was inflating the row
+   and knocking the checkbox/text a few px below the dropdown's text centerline. */
+.lt-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 14px;
+  color: var(--fg);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+.lt-toggle input {
+  width: auto;
+  margin: 0;
+  cursor: pointer;
+}
+
+/* Fixed layout so a re-sort can't reflow column widths: the structured columns get
+   set widths (via <colgroup>), the text column takes the rest, and long values wrap
+   in place rather than resizing the column. */
+.list-table {
+  table-layout: fixed;
+  /* These full-page data tables sit directly on the card-colored page ground, where the
+     base `table` --line hairline is nearly the same color as the ground (most visibly in
+     dark) and reads as no container at all. Take the stronger --line-soft so the table
+     reads as one bounded surface rather than loose rows. */
+  border-color: var(--line-soft);
+  /* A floor, inside the scrolling .table-wrap: without it, once the fixed columns
+     outgrow the viewport the one flexible text column absorbs the whole deficit,
+     computes to 0px, and `overflow-wrap: anywhere` breaks it one letter per line. */
+  min-width: 560px;
+}
+.list-table td,
+.list-table th {
+  overflow-wrap: anywhere;
+}
+.list-table .c-status {
+  width: 128px;
+}
+/* Wide enough for the longest date on one line, a date outside the current year with
+   its year ("Sep 30, 2027, 12:00 AM"), with room for a wider system font. Narrower
+   screens, until the table stacks, keep the room for the text column instead (the Drafts
+   table has two date columns), so an off-year date wraps there. */
+.list-table .c-date {
+  width: 176px;
+}
+@media (max-width: 840px) {
+  .list-table .c-date {
+    width: 148px;
+  }
+}
+.list-table .c-num {
+  width: 104px;
+}
+/* The Sent table's Delivered column: a number plus, on a bad send, its delivery-failure note
+   beneath (`.delivered-note`). Sized so the usual one- or two-kind note ("13 bounced,
+   12 unsent") fits on one sub-line; only the rare three-kind note takes a second,
+   breaking between kinds. */
+.list-table .c-delivered {
+  width: 176px;
+}
+/* Every Sent row, on the Sent page and the dashboard, as tall as one with a delivery note under its count, so a row with none (a
+   one-recipient test) sits in the same rhythm as the rest. A row's height is its floor; once
+   the table stacks, each row is a block that takes its own height. */
+/* The dashboard's Drafts card is half the page wide: its date stays on one line, and the title
+   takes what room is left. */
+.dash-drafts {
+  table-layout: fixed;
+}
+/* Wide enough for the longest "edited <date>", a two-digit day and hour included, with the
+   cell's padding: the fixed layout clips anything wider rather than growing the column. */
+.dash-drafts td.edited {
+  width: 15em;
+  white-space: nowrap;
+}
+@media (min-width: 721px) {
+  .sent-table tbody tr,
+  .dash-sent tbody tr {
+    height: 56px;
+  }
+}
+.list-table .c-act {
+  width: 56px;
+}
+/* Subscribers: a floor that keeps the email column about 250px beside its two others. With
+   only Status and Joined beside an address, which rarely needs more than half the row, fixed
+   widths left one wide gap before them; a share of the row each spreads the space evenly. */
+.list-table.subs-table {
+  min-width: 610px;
+}
+.list-table.subs-table .c-status,
+.list-table.subs-table .c-date {
+  width: 24%;
+}
+
+.dash-section table {
+  border-color: var(--line);
+}
+
+/* sortable column headers: the label is a borderless button that fills the cell */
+th.sortable {
+  padding: 0;
+}
+th.sortable .th-sort {
+  width: 100%;
+  border: 0;
+  background: none;
+  margin: 0;
+  padding: 10px 12px;
+  text-align: inherit;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+th.sortable .th-sort:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+th.sortable.sorted .th-sort {
+  color: var(--fg);
+}
+/* A fixed-width slot for the sort arrow so the label stays put whether or not the
+   column is the active sort. */
+.th-arrow {
+  display: inline-block;
+  width: 0.85em;
+  margin-left: 3px;
+  text-align: center;
+  color: var(--muted);
+}
+th.num,
+th.num .th-sort {
+  text-align: right;
+}
+
+/* offset pager: "a–b of N" between Prev / Next */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 14px;
+}
+.pager-range {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.pager button[disabled] {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* A route's or an object's sections (query, body, returns, refusals, fields) as Stripe's and
+   Mux's references set theirs: a heading over a rule, then unboxed rows, each with the name,
+   its type, and Required on one line and what it means under it, so a long name never
+   squeezes its description. A name breaks only where its words join (the <wbr> the page puts
+   after each _ . /). */
+.block.api-sec {
+  margin-top: 22px;
+}
+.api-sec > .block-head {
+  margin: 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.api-sec > .block-head .block-label {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.api-sec-meta {
+  margin-left: 2px;
+  font: 400 12px var(--mono);
+  color: var(--muted);
+}
+/* Rules divide rows; the last row in a section has none under it. */
+.api-row,
+.api-lrow {
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+}
+.api-row:last-child,
+.api-lrow:last-child {
+  border-bottom: 0;
+}
+.api-row-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+code.api-row-name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: break-word;
+}
+.api-row-type {
+  font: 12px var(--mono);
+  color: var(--muted);
+}
+/* A type that names an object links to it, and reads as a link. */
+.api-row-type a {
+  color: var(--fg);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.api-row-desc {
+  margin-top: 3px;
+  font-size: 13.5px;
+}
+/* The refusals and the statuses are a ledger: the status in a column of its own, tinted by
+   its class, so a reader scans by status. */
+.api-lrow {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 6px;
+}
+.api-st {
+  font: 600 12.5px / 20px var(--mono);
+  color: var(--muted);
+}
+.api-st-4xx {
+  color: var(--warn-fg);
+}
+.api-st-5xx {
+  color: var(--danger-fg);
+}
+.api-st-2xx {
+  color: var(--ok-fg);
+}
+.api-with {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+/* A status's name is words, not a code. */
+.api-statuses code.api-row-name {
+  font-family: inherit;
+}
+/* A value's short cells beside its name (a condition kind's severity and fields), each led by
+   its column's name, and the label of a later long line ("Remedy:"). */
+.api-row-meta {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.api-row-key {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+/* What every route shares, described once ahead of the routes: concept prose, an object's
+   description, an enum's values under a field's line, and the refusal table's next moves. */
+/* The reference's paragraphs, each with space below it, as a doc page's are. */
+.api-prose {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+/* A list in the reference's prose (the status ranges under Requests), set like its paragraphs. */
+.prose-list {
+  padding-left: 20px;
+}
+.prose-list li {
+  margin: 6px 0;
+}
+.api-values {
+  margin: 4px 0 0;
+  padding-left: 16px;
+}
+.api-values li {
+  margin: 2px 0;
+}
+/* The name of a group an enum's values fall into, over its bullets. */
+.api-values-group {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.api-returns {
+  margin: 4px 0 6px;
+  font-size: 13.5px;
+}
+/* A refusal's next move, under what it means: quieter, the step a client takes from it. */
+.api-move-next {
+  display: block;
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+/* editor header */
+.editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  text-decoration: none;
+  color: var(--muted);
+  font-size: 14px;
+  padding: 6px 10px;
+  border-radius: 0;
+}
+.back:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+.editor-head-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+/* A post's web version (#/web/post/…): the post page as it will look, filling the window
+   with no app chrome, since it opens in a tab of its own. The window scrolls the page. */
+body.web-mode .sidebar,
+body.web-mode .nav-toggle {
+  display: none;
+}
+body.web-mode .content {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+/* The page sits under one strip that says where the post stands (DESIGN §3). The strip is
+   the editor's, above the frame, and the frame is as tall as the post, so the window scrolls
+   and the strip goes up with the page like the test pages' strip. It wears the brand accent
+   like the reader surface's dev pill, its tag as the pill's inverted chip, and its content
+   sits in the default template's column so it lines up with the post. The test pages carry
+   the same strip in the reader shell (READER_BANNER_STYLE in src/lib/page.ts); keep the two
+   in sync. */
+/* At least the window's height, so a post shorter than the window still has its own
+   ground to the bottom: the frame grows into what's left, and the framed page's background
+   fills it. */
+.web-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+}
+.web-bar {
+  flex: none;
+  background: var(--accent);
+  color: var(--accent-on);
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+/* The tag runs in, inline with the sentence, so on a phone the sentence wraps beneath it at
+   the strip's full width rather than in a narrow column beside it. */
+.web-bar-in {
+  /* The default template's 664px column inside its 12px gutter, with the column's 32px
+     padding, so the strip's text starts on the post's left edge at any width over a phone's. */
+  max-width: 688px;
+  margin: 0 auto;
+  padding: 10px 44px;
+  text-align: left;
+}
+/* The reader pages' Dev pill exactly (`.r-dev-tag` in src/lib/page.ts), so the two read as one. */
+.web-bar-tag {
+  display: inline-block;
+  margin-right: 10px;
+  font-size: 9.5px;
+  line-height: 1.6;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 0;
+  background: var(--accent-on);
+  color: var(--accent);
+  cursor: default;
+}
+.web-bar-text {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 560px) {
+  .web-bar-in {
+    padding: 10px 16px;
+  }
+}
+.web-frame {
+  display: block;
+  flex: 1 0 auto;
+  width: 100%;
+  /* The post's height once measured; until then a window's, so the page doesn't flash short. */
+  height: 100vh;
+  border: 0;
+}
+.web-error {
+  max-width: 640px;
+  margin: 48px auto;
+  padding: 0 16px;
+}
+/* Sent record view: a read-only delivery record. The outcome tiles reuse the
+   semantic feedback scales (--ok / --warn / --danger, DESIGN §8); a status badge, not
+   a feedback color, still labels the send's lifecycle. */
+.rec-card {
+  display: flex;
+  flex-direction: column;
+}
+.rec-head h1 {
+  margin: 0 0 6px;
+  font-size: 22px;
+  letter-spacing: -0.01em;
+}
+.rec-meta {
+  color: var(--muted);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* Who acted on the send, a line under when it was sent (SPEC §11). */
+.rec-by {
+  margin-top: 2px;
+}
+/* Names the living layer of the record: the outcome tiles below keep moving as receipts
+   arrive, while the audience at fire and the published post are fixed (SPEC §8). */
+.rec-tiles-cap {
+  margin: 16px 0 0;
+  font-size: 12.5px;
+}
+.rec-tiles {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+  margin: 10px 0 4px;
+}
+.rec-tile {
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  padding: 13px 14px;
+}
+.rec-n {
+  font-size: 24px;
+  font-weight: 680;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.rec-n.ok {
+  color: var(--ok-fg);
+}
+.rec-n.warn {
+  color: var(--warn-fg);
+}
+.rec-n.danger {
+  color: var(--danger-fg);
+}
+.rec-l {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.rec-sw {
+  width: 9px;
+  height: 9px;
+  border-radius: 0;
+  flex: none;
+}
+.rec-sw.sw-neutral {
+  background: var(--muted);
+}
+.rec-sw.sw-ok {
+  background: var(--ok-fg);
+}
+.rec-sw.sw-warn {
+  background: var(--warn-fg);
+}
+.rec-sw.sw-danger {
+  background: var(--danger-fg);
+}
+.rec-recon {
+  margin: 12px 0 0;
+  font-size: 13px;
+}
+.rec-actions {
+  margin: 16px 0 0;
+}
+.rec-note {
+  margin: 14px 0 0;
+  font-size: 13px;
+}
+/* "Show all N scheduled" expander under the soonest queued send on the Sent page. */
+.sched-toggle {
+  margin-top: 8px;
+}
+@media (max-width: 720px) {
+  .rec-tiles {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* ---- per-recipient record: the rows behind the outcome tiles ---- */
+.rec-people {
+  margin-top: 26px;
+}
+.rec-people-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.rec-people-title {
+  margin: 0;
+  font-size: 15px;
+}
+/* The view toggle (Failures / Delivered / All) is a Control, not a button (DESIGN §7):
+   the same segmented, aria-pressed pill group as the Template preview-width toggle, its
+   active segment in the Secondary palette. It switches what you're looking at; it never
+   commits an action. */
+.rec-views {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line-soft);
+  border-radius: 0;
+  background: var(--card);
+}
+.rec-view-btn {
+  border: 0;
+  background: transparent;
+  padding: 5px 12px;
+  font-size: 12.5px;
+  color: var(--muted);
+  border-radius: 0;
+  cursor: pointer;
+}
+.rec-view-btn[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.rec-people-search {
+  margin: 12px 0;
+  max-width: 300px;
+}
+.rec-people-table .c-out {
+  width: 190px;
+}
+.rec-people-table .rec-email {
+  font-weight: 500;
+}
+/* An outcome cell reuses the tile swatch palette (sw-ok / sw-warn / sw-danger /
+   sw-sending / sw-neutral) so a row reads the same bucket as its tile above. The
+   swatch + label hold one line — nowrap so the label never breaks mid-word in the
+   fixed-width column; the consequence is said in the reconciliation line above, not
+   inline or on hover (DESIGN §11), so the row stays a clean one-liner. A plain label,
+   so the default cursor. */
+.rec-out {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+  cursor: default;
+}
+.rec-people-empty {
+  margin: 14px 0 0;
+  font-size: 13px;
+}
+
+/* ---- live in-flight watch: the `sending` state of the record view ---- */
+/* The sending treatment is blue (--status-sending-*, DESIGN §8) — distinct from the
+   action slate-blue — carried by the phase pill, the dispatch bar, and the swatch. */
+.rec-sw.sw-sending {
+  background: var(--status-sending-fg);
+}
+.watch-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.watch-title h1 {
+  margin: 0 0 6px;
+  font-size: 22px;
+  letter-spacing: -0.01em;
+}
+/* The derived-phase pill (progressing / retrying / backing_off / needs_attention /
+   settling / …). Tones reuse the status + semantic palettes so a phase reads the same
+   hue as its badge elsewhere. A plain label, so the default cursor (DESIGN §11). */
+.phase-pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 0;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--line);
+  white-space: nowrap;
+  cursor: default;
+}
+.phase-pill.tone-sending {
+  background: var(--status-sending-bg);
+  color: var(--status-sending-fg);
+  border-color: var(--status-sending-line);
+}
+.phase-pill.tone-ok {
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+  border-color: var(--ok-line);
+}
+.phase-pill.tone-warn {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  border-color: var(--warn-line);
+}
+.phase-pill.tone-danger {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  border-color: var(--danger-line);
+}
+.phase-pill.tone-scheduled {
+  background: var(--status-scheduled-bg);
+  color: var(--status-scheduled-fg);
+  border-color: var(--status-scheduled-line);
+}
+.phase-pill.tone-muted {
+  background: var(--status-draft-bg);
+  color: var(--status-draft-fg);
+  border-color: var(--status-draft-line);
+}
+.wbars {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 18px 0 4px;
+}
+.wbar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+.wbar-label {
+  font-weight: 600;
+}
+.wbar-count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.wbar {
+  position: relative;
+  height: 10px;
+  border-radius: 0;
+  background: var(--line-soft);
+  overflow: hidden;
+}
+/* Fills are absolutely stacked from the left so the dual (delivery) bar can layer a green
+   `confirmed` fill over a grey `accepted` fill (green ≤ grey, so grey shows behind it). */
+.wbar-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  border-radius: 0;
+  transition: width 0.6s ease;
+}
+/* Dispatch fill is the solid blue sending hue. The delivery bar pairs to dispatch's scale:
+   a grey `accepted` segment (the same frontier the dispatch bar reaches) with green
+   `confirmed` filling in behind it as receipts arrive. */
+.wbar-fill.tone-sending {
+  background: var(--status-sending-fg);
+}
+.wbar-fill.tone-accepted {
+  background: color-mix(in srgb, var(--muted) 50%, var(--line-soft));
+}
+.wbar-fill.tone-ok {
+  background: var(--ok-fg);
+}
+.wbar-sub {
+  margin-top: 6px;
+  font-size: 12.5px;
+}
+.wcounts {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin: 18px 0 4px;
+}
+.wcount {
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  padding: 11px 12px;
+}
+.wcount-n {
+  font-size: 20px;
+  font-weight: 680;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.wcount-l {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.whealth {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.whealth-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--ok-fg);
+  flex: none;
+}
+.whealth.has-failures {
+  color: var(--warn-fg);
+}
+.whealth.has-failures .whealth-dot {
+  background: var(--warn-fg);
+}
+@media (max-width: 720px) {
+  .wcounts {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* ---- active-send row (Sent page "In progress") + dashboard widget ---- */
+/* An in-flight send as a card with a live mini dispatch bar; blue, so it reads as
+   "sending" — distinct from the scheduled violet cards and the neutral sent rows. */
+.card.active-card {
+  background: var(--status-sending-bg);
+  border-color: var(--status-sending-line);
+  gap: 16px;
+}
+.active-main {
+  flex: 1;
+  min-width: 0;
+}
+.active-subj {
+  display: block;
+  color: var(--fg);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-bottom: 6px;
+}
+.active-bar {
+  height: 8px;
+  border-radius: 0;
+  background: color-mix(in srgb, var(--status-sending-fg) 22%, transparent);
+  overflow: hidden;
+}
+.active-fill {
+  height: 100%;
+  border-radius: 0;
+  background: var(--status-sending-fg);
+  transition: width 0.6s ease;
+}
+.active-stat {
+  margin-top: 6px;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+/* A send in flight too long (SPEC §12) says so on its card, in the amber the dashboard's
+   health line gives the same condition. */
+.active-stuck {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--warn-fg);
+}
+/* A scheduled send's card while no provider is connected (DESIGN §4): the countdown stays,
+   and a line beneath it in amber says the send will be held when it fires. The editor's
+   violet banner says it as a .sched-note instead, since amber text doesn't read on violet. */
+.sched-held {
+  margin-top: 4px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--warn-fg);
+}
+/* The editor's scheduled banner stacks its line and the held line on the left. */
+.banner-scheduled .sched-main {
+  display: flex;
+  flex-direction: column;
+  /* Takes the room and wraps its own lines (the re-made line is a sentence), so Reschedule
+     and Cancel stay at the right rather than dropping below; on a phone the row still wraps. */
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+/* A draft's not-connected line sits above its actions bar, which keeps its own top gap. */
+.health.editor-not-connected {
+  margin: 16px 0 0;
+}
+
+/* Composer: GitHub-style Write/Preview tabs + a formatting toolbar */
+.composer {
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--card);
+  margin-bottom: 4px;
+}
+.composer:focus-within {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 1px var(--ring);
+}
+/* A scheduled post's body is locked, so focus rings it in grey, as the locked subject's is,
+   rather than in the blue that says "type here" (DESIGN §3). */
+.composer.composer-locked:focus-within {
+  border-color: var(--muted);
+  box-shadow: 0 0 0 1px var(--muted);
+}
+.composer-head {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 6px 8px 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  flex-wrap: wrap;
+}
+.ctabs {
+  display: flex;
+  gap: 4px;
+}
+.ctab {
+  border: 1px solid transparent;
+  border-bottom: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 8px 16px;
+  border-radius: 0;
+  cursor: pointer;
+  font-size: 14px;
+  margin-bottom: -1px;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+}
+/* The label row: an icon beside the word, the same pairing the settings toggles use. */
+.ctab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ctab-label svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+}
+/* Reserve the width of the active (600) label so toggling weight never reflows the tab;
+   the margin stands in for the icon and its gap. */
+.ctab::after {
+  content: attr(data-text);
+  height: 0;
+  margin-left: 21px;
+  font-weight: 600;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+.ctab:hover {
+  color: var(--fg);
+}
+.ctab.active {
+  background: var(--card);
+  color: var(--fg);
+  border-color: var(--line);
+  font-weight: 600;
+}
+.toolbar {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding-bottom: 6px;
+  flex-wrap: wrap;
+}
+.toolbar.off {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.toolbar .sep {
+  width: 1px;
+  height: 20px;
+  background: var(--line);
+  margin: 0 6px;
+}
+/* A scheduled post's toolbar stays in view with its buttons greyed. They carry
+   aria-disabled, not disabled, so a click still lands and can nudge the foot line
+   (`.composer-foot-lock`), which is where the way out is written. */
+.tb {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 0;
+  cursor: pointer;
+}
+.tb:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+.tb[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.tb[aria-disabled="true"]:hover {
+  background: transparent;
+  color: var(--muted);
+}
+/* On the Preview tab the whole toolbar is already dimmed by `.toolbar.off`; a locked post's
+   per-button dim must not stack on it, or the toolbar all but vanishes there (0.4 x 0.4) and
+   its weight changes with the tab. One dim at a time. */
+.toolbar.off .tb[aria-disabled="true"] {
+  opacity: 1;
+}
+.tb svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+  display: block;
+}
+.composer-body {
+  position: relative;
+}
+/* Post editor syntax-highlight overlay: a transparent <textarea> layered over
+   a highlighted <pre> that shows the colored Markdown beneath the caret. The two share
+   identical box + font metrics so the caret sits exactly on the colored text; the textarea
+   is the only scroller and the <pre> is synced to it in script. Unlike the template editor
+   this soft-wraps (Markdown is prose, not code) — hence pre-wrap on both and no line-number
+   gutter — and reuses the shared --syntax-* palette. The textarea keeps normal flow (it owns
+   the height + resize) and paints above the absolutely-positioned <pre> by DOM order, so no
+   z-index is needed and the drop overlay still layers on top. */
+.md-hl,
+.composer-body textarea.editor {
+  margin: 0;
+  padding: 14px;
+  font-family: var(--mono);
+  font-size: 13.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  tab-size: 2;
+  /* Reserve the scrollbar's width on BOTH layers, always. Where scrollbars take layout space
+     (Windows/Linux, or "always show"), the textarea's would otherwise shrink its wrap width
+     only when it scrolls — wrapping long lines a column earlier than the full-width overlay and
+     drifting the caret off the colored text. A stable gutter keeps both wrap identically; with
+     macOS overlay scrollbars it reserves nothing, so nothing changes there. */
+  scrollbar-gutter: stable;
+}
+.md-hl {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  color: var(--syntax-fg);
+  background: var(--syntax-bg);
+  pointer-events: none;
+}
+.md-hl code {
+  font: inherit;
+  display: block;
+}
+/* One block row per source line (see highlightMarkdown): this is what lets a fenced code
+   region carry a single continuous background across its lines and keeps the row count — and
+   the caret's line position — locked to the textarea. min-height holds an empty row open to
+   exactly one line so a blank line in the source doesn't collapse and shift everything below. */
+.cx-md-ln {
+  display: block;
+  min-height: 1lh;
+}
+.cx-md-band {
+  background: var(--syntax-code-bg);
+}
+.composer-body textarea.editor {
+  position: relative;
+  border: 0;
+  border-radius: 0;
+  width: 100%;
+  min-height: 320px;
+  resize: vertical;
+  display: block;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--fg);
+}
+.composer-body textarea.editor:focus {
+  outline: none;
+}
+.composer-body textarea.editor::selection {
+  /* The textarea's own text is transparent, so a plain selection would be invisible —
+     tint the selection background instead so the highlighted text beneath reads as selected. */
+  background: var(--accent-soft);
+}
+.composer-body iframe.preview {
+  width: 100%;
+  min-height: 200px;
+  border: 0;
+  background: #fff;
+  display: block;
+}
+/* A scheduled post's Edit tab (DESIGN §3): the text stays fully legible, selectable, and
+   copyable (the fields are readonly, not disabled, since a disabled textarea cannot even be
+   selected), on the recessed surface Settings uses for a read-only card (`.set-card.sunken`);
+   the caret is hidden because the field is not for typing. The way out is the composer's
+   foot line, below. */
+.composer-body.locked .md-hl {
+  background: var(--sunken);
+}
+.composer-body.locked textarea.editor {
+  caret-color: transparent;
+  cursor: default;
+}
+/* Its text is muted, as the subject's is, so the body reads as locked at a glance. */
+.composer-body.locked .md-hl code {
+  opacity: 0.72;
+}
+/* The subject of a scheduled post is read-only too, and readonly (unlike disabled) carries no
+   native greying, so it is styled to look locked while keeping what disabled would take away:
+   it can still be focused, selected, and copied, and a keystroke still pulses the foot line.
+   The recessed surface, muted text, an arrow cursor, and a grey focus ring in place of the
+   blue one that says "type here" (DESIGN §3). */
+#f-subject[readonly] {
+  background: var(--sunken);
+  border-color: var(--line-soft);
+  color: var(--muted);
+  cursor: default;
+}
+#f-subject[readonly]:focus-visible {
+  outline-color: var(--muted);
+}
+.composer-body.dragover::after {
+  content: "Drop images to upload";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--ring) 14%, var(--card));
+  border: 2px dashed var(--ring);
+  color: var(--fg);
+  font-weight: 600;
+  pointer-events: none;
+}
+.composer-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+  border-radius: 0 0 8px 8px;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+.composer-foot:hover {
+  color: var(--fg);
+}
+/* On the Preview tab the image foot dims with the toolbar (`.toolbar.off`): a click there
+   would insert into the hidden Edit text. A drop on the composer still works; it switches
+   to Edit first, so the result is seen. */
+.composer-foot.off {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.composer-foot svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+/* The locked composer's foot: where a draft's foot offers images, a scheduled post's says
+   the way out, "Cancel the schedule to edit", with the read-only lock Settings uses. It is
+   a hint, not a control (Cancel stays on the banner, DESIGN §3), so no pointer and no hover
+   lift. `.nudge` pulses it once, in the read-only note's tint, when an edit is attempted,
+   so the refusal is seen where the keystroke landed; reduced-motion holds the tint instead. */
+.composer-foot-lock {
+  cursor: default;
+}
+.composer-foot-lock:hover {
+  color: var(--muted);
+}
+.composer-foot-lock svg {
+  fill: currentColor;
+  color: var(--warn-fg);
+}
+.composer-foot-lock.nudge {
+  animation: lock-nudge 900ms ease-out;
+}
+@keyframes lock-nudge {
+  from {
+    background: color-mix(in srgb, var(--warn-fg) 18%, transparent);
+  }
+  to {
+    background: transparent;
+  }
+}
+
+/* The editor's subject, body, and actions sit on the page itself, with no card around them:
+   the fields and the composer carry their own borders, aligned with the head and the banner. */
+.editor-form > label:first-child {
+  margin-top: 6px;
+}
+.actions-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+/* A locked (scheduled) post's actions bar holds Send test email alone: no Primary,
+   nothing to autosave, and the lock is said where editing would happen, on the
+   composer. The lone row keeps to the right, where the draft's send actions sit. */
+.actions-bar > .row:only-child {
+  margin-left: auto;
+}
+/* The save side takes the room left over and lets a long cue (why a save failed) wrap
+   inside it, so the test and schedule buttons keep their place at the right. */
+.actions-bar > .row:first-child:not(:only-child) {
+  flex: 1 1 16rem;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+/* The autosave cue (DESIGN §5, §6), beside Save draft. The editor's save lifecycle:
+   Unsaved (amber --warn dot) · Saving… (pulsing --accent dot) · Saved (green --ok
+   dot). The dot is a reinforcement, never the whole signal — the text label carries
+   each state too, so the cue survives a reader who can't tell the dot's color. The
+   "unsaved" cue reads the same amber as the shared save bar so both save models feel
+   like one app. :empty (locked posts, which can't autosave) collapses it out. */
+/* A scheduled send never tested, said quietly beside the control that settles it (SPEC §8). */
+.test-hint {
+  font-size: 13px;
+  color: var(--muted);
+}
+.test-row {
+  gap: 1rem;
+}
+.save-status {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 7px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.save-status:empty {
+  display: none;
+}
+.save-status.is-dirty {
+  color: var(--fg);
+}
+.save-status.is-error {
+  color: var(--danger-fg);
+}
+.save-status.is-dirty::before,
+.save-status.is-saving::before,
+.save-status.is-saved::before,
+.save-status.is-error::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.save-status.is-dirty::before {
+  background: var(--warn-fg);
+}
+.save-status.is-saving::before {
+  background: var(--accent);
+  animation: save-pulse 1s ease-in-out infinite;
+}
+.save-status.is-saved::before {
+  background: var(--ok-fg);
+}
+.save-status.is-error::before {
+  background: var(--danger-fg);
+}
+@keyframes save-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.warnings {
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  color: var(--warn-fg);
+  border-radius: 0;
+  padding: 8px 12px;
+  font-size: 13px;
+  margin-top: 10px;
+}
+
+/* toasts (live region) */
+/* Spans the viewport and centers its toasts, rather than left: 50% plus a transform,
+   which caps a toast's width at half the screen and wraps a sentence on a phone. */
+#toasts {
+  position: fixed;
+  bottom: 20px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  z-index: var(--z-toast);
+  pointer-events: none;
+}
+/* Spaced by margin, not the column's gap, so a leaving toast can collapse its share. */
+.toast {
+  box-sizing: border-box;
+  max-width: 480px;
+  margin-top: 8px;
+  overflow: hidden;
+  background: var(--fg);
+  color: var(--bg);
+  padding: 10px 16px;
+  border-radius: 0;
+  font-size: 14px;
+  opacity: 0;
+  transform: translateY(6px);
+  transition:
+    opacity 0.2s,
+    transform 0.2s;
+}
+.toast.show {
+  opacity: 1;
+  transform: none;
+}
+/* Leaving: fade while the height (set inline by leaveToast, since a transition can't run
+   from auto), padding, and spacing collapse, so the stack settles smoothly. 0.3s is
+   TOAST_LEAVE_MS in client/ui/widgets.ts. */
+.toast.leaving {
+  opacity: 0;
+  margin-top: 0;
+  padding-block: 0;
+  transition:
+    opacity 0.2s,
+    height 0.3s,
+    margin-top 0.3s,
+    padding-block 0.3s;
+}
+
+/* modal */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--z-modal);
+  padding: 16px;
+}
+.modal {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  padding: 22px;
+  width: min(440px, 100%);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
+}
+.modal h3 {
+  margin: 0 0 6px;
+  font-size: 17px;
+}
+.modal .hint {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0 0 14px;
+  line-height: 1.5;
+}
+/* A dialog's not-connected line (DESIGN §4) takes the health block's amber warning, so it
+   reads as the reason the dialog's action is off rather than as one more hint. */
+.modal .hint.not-connected {
+  color: var(--warn-fg);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  border-radius: 0;
+  padding: 10px 12px;
+}
+.modal .hint.not-connected a {
+  color: inherit;
+}
+/* On Workers Free's limits, a send too large for D1's daily writes (DESIGN §4): the same amber
+   box, since it is a warning to read before scheduling, though it disables nothing. */
+.modal .hint.daily-writes {
+  color: var(--warn-fg);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  border-radius: 0;
+  padding: 10px 12px;
+}
+.modal .actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+/* A quiet divider row in a modal for a subordinate alternate path — e.g. the demoted
+   "Send now →" beneath Schedule, and the "← Back to schedule" that returns from it. */
+.modal .altrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+/* The alternate-path row can carry a plain note beside its link; the note wraps and the
+   link stays whole on its line. */
+.modal .altrow .altrow-note {
+  font-size: 12.5px;
+  color: var(--muted);
+  min-width: 0;
+}
+.modal .altrow .linkbtn {
+  flex: none;
+  white-space: nowrap;
+}
+/* The Send-now view's way back to the Schedule view, at the start of its button row: it
+   returns from, rather than demotes below, the Schedule view, so it takes no row of its own. */
+.modal .actions .actions-back {
+  margin-right: auto;
+}
+/* Link — a text-link-styled action (DESIGN §7), not one of the button roles. Reserved
+   for a deliberately subordinate choice, like the in-modal Send now that sits below
+   the Schedule Primary: it must read as clearly demoted, so it is a link, not a Ghost
+   button that would compete with Cancel. Still a real <button>, so it's keyboard- and
+   screen-reader-reachable (it's now the only route to Send now). */
+button.linkbtn {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 0;
+  text-decoration: underline;
+  border-radius: 0;
+}
+button.linkbtn:hover {
+  filter: brightness(1.08);
+}
+
+.countdown {
+  font-variant-numeric: tabular-nums;
+  /* The scheduled violet (DESIGN §8), so the fire-time countdown on the scheduled
+     cards (Sent page + dashboard) carries the same "scheduled" cue as the pill. */
+  color: var(--status-scheduled-fg);
+}
+/* Past the server's missed tolerance the countdown says how late the send is, in the
+   danger tone: a missed fire time needs a look (DESIGN §4). */
+.countdown.countdown-missed {
+  color: var(--danger-fg);
+}
+/* Scheduled cards — the dashboard's "Scheduled" section and the Sent page's next-up
+   queue — take the violet fill + border so a queued send reads as scheduled at a
+   glance (the two-class selector wins over `.card`'s neutral surface + border). */
+.card.sched-card {
+  background: var(--status-scheduled-bg);
+  border-color: var(--status-scheduled-line);
+}
+/* One title weight/size across every scheduled notice (card subject + banner date),
+   so the "title" is consistent from the Drafts list to the Sent queue to the editor. */
+.sched-subj {
+  display: block;
+  color: var(--fg);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-bottom: 3px;
+}
+.banner-scheduled strong {
+  font-weight: 600;
+}
+
+/* posts page + row-action menu */
+.page-head {
+  margin-bottom: 16px;
+}
+/* A head with several acts (Subscribers: Import, Export, Add subscriber) puts them under
+   the title when the two don't fit side by side, rather than squeezing either. */
+.spread.page-head {
+  flex-wrap: wrap;
+}
+.page-head-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.page-head-row h1 {
+  margin: 0;
+}
+/* The re-make confirmation's list of scheduled posts: subject and fire time per row. */
+.remake-list {
+  list-style: none;
+  margin: 10px 0 12px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  overflow: hidden;
+}
+.remake-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+.remake-list li + li {
+  border-top: 1px solid var(--line);
+}
+.remake-list li span:last-child {
+  color: var(--muted);
+  white-space: nowrap;
+}
+/* The three facts the publisher scans before committing: what changes, what stays,
+   what's next. A label column so the eye lands on the verbs, not a paragraph. */
+.remake-facts {
+  margin: 0 0 12px;
+  display: grid;
+  gap: 4px;
+  font-size: 13.5px;
+}
+.remake-facts > div {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 10px;
+}
+.remake-facts dt {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  line-height: 1.6;
+}
+.remake-facts dd {
+  margin: 0;
+}
+td.act {
+  text-align: right;
+  width: 1%;
+  white-space: nowrap;
+}
+.menu-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-menu);
+}
+.menu {
+  position: absolute;
+  /* Same rung as its overlay; the menu is appended after the overlay, so it paints on top. */
+  z-index: var(--z-menu);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  padding: 4px;
+  min-width: 150px;
+}
+.menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  padding: 8px 12px;
+  border-radius: 0;
+  font-size: 14px;
+  color: var(--fg);
+  cursor: pointer;
+}
+.menu-item:hover {
+  background: var(--hover);
+}
+.menu-item.danger-item {
+  color: var(--danger-fg);
+}
+/* A menu whose items say what each pick does: a name over a muted line. */
+.menu-described {
+  width: 280px;
+  max-width: min(280px, 78vw);
+}
+.menu-item-name {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+}
+.menu-item-desc {
+  display: block;
+  margin-top: 1px;
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+/* editor field hints + scheduled banner */
+.field-hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+/* --- Field validation (DESIGN §5): an error about one field lives on that
+   field — the input goes to an invalid state and the reason sits directly beneath it,
+   tied by aria-describedby. This replaces the old disable-the-button + `title` tooltip,
+   which never reached keyboard, touch, or screen-reader users. --- */
+input.is-invalid,
+textarea.is-invalid {
+  border-color: color-mix(in srgb, var(--danger-fg) 55%, var(--line-soft));
+  background: color-mix(in srgb, var(--danger-fg) 5%, var(--card));
+}
+.field-error {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--danger-fg);
+}
+.field-error .field-error-ico {
+  font-weight: 700;
+}
+/* A dialog's own error, when no one field is at fault: just above its actions, where the
+   reader is looking rather than in a toast at the foot of the screen (DESIGN §5). */
+.modal .dialog-error {
+  margin-top: 12px;
+}
+/* Info icon: the field explanation lives in its hover/focus tooltip. The padding
+   + equal negative margin enlarge the hover/click target to ~28px without moving
+   the glyph or growing the label row. */
+.info {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  margin: -6px;
+  border-radius: 0;
+  color: var(--muted);
+  cursor: help;
+}
+.info svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+  display: block;
+}
+/* :focus (not just :focus-visible) so the tip also opens for touch — a tap
+   focuses the span but doesn't count as "visible" focus. */
+.info:hover,
+.info:focus {
+  color: var(--fg);
+  background: var(--hover);
+}
+.info::after {
+  content: attr(data-tip);
+  /* Decorative + non-interactive: the aria-label carries the text for AT, and the
+     tip must never swallow a tap/click meant for what sits beneath it. */
+  pointer-events: none;
+  position: absolute;
+  /* Anchored to the icon's left edge; --tip-x lets JS nudge it left so it never
+     runs off the right edge on a narrow screen (see positionInfoTip in app.js).
+     max-width is also capped to the viewport so the box itself always fits. */
+  left: var(--tip-x, 0px);
+  bottom: calc(100% + 8px);
+  z-index: var(--z-menu);
+  width: max-content;
+  /* Cap the content box so the border box never exceeds the viewport minus an 8px
+     gutter each side: 34px = 2×8 gutter + 2×9 horizontal padding (content-box). */
+  max-width: min(230px, calc(100vw - 34px));
+  background: var(--fg);
+  color: var(--bg);
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 6px 9px;
+  border-radius: 0;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(2px);
+  transition:
+    opacity 0.12s,
+    transform 0.12s,
+    visibility 0.12s;
+}
+.info:hover::after,
+.info:focus::after {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+/* --- Editor-state banner (DESIGN §5): a standing, in-flow line at the top of the
+   editor, in two variants. `scheduled` marks a frozen, soft-locked post (SPEC §6);
+   `conflict` warns the draft changed elsewhere (another tab, or Claude), and its two
+   actions are equal-weight Ghost, since both choices lose something. --- */
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  border: 1px solid;
+  border-radius: 0;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  font-size: 14px;
+}
+.banner .row {
+  flex: 0 0 auto;
+}
+.banner strong {
+  color: inherit;
+}
+.banner-scheduled {
+  background: var(--status-scheduled-bg);
+  color: var(--status-scheduled-fg);
+  border-color: var(--status-scheduled-line);
+}
+.banner-conflict {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  border-color: var(--warn-line);
+}
+
+/* Look changed since your last test (SPEC §8): the server's condition, a line in the scheduled
+   banner that says to send a new test, and a mark on the dashboard's scheduled card. */
+.sched-remade {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 6px;
+  font-size: 13px;
+}
+/* The scheduled banner's notes under the countdown (DESIGN §4): a send that will be held
+   with no provider connected, and one too large for D1's daily writes on Workers Free's
+   limits. Each keeps the banner's own violet, since amber words on violet fall short of
+   contrast and mix two of the color meanings, and an amber ⚠️ leads it to say it's worth a
+   look. Held is the stronger of the two (the send won't go out), so it keeps the weight. */
+.sched-note {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--status-scheduled-fg);
+}
+.sched-note-mark {
+  flex: none;
+}
+.sched-note-held {
+  font-weight: 500;
+}
+.sched-remade-mark {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--status-scheduled-fg);
+}
+/* Who scheduled the send and who last moved it (SPEC §11), under the time, in the banner's
+   violet: a fact about the send, not a note asking for a look. */
+.sched-by {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--status-scheduled-fg);
+}
+/* The Email only box under a dialog's time: the label, then its helper beneath. */
+.listing-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 14px 0 0;
+  font-size: 14px;
+  color: var(--fg);
+  cursor: pointer;
+}
+.listing-check input {
+  width: auto;
+  margin: 3px 0 0;
+  flex: 0 0 auto;
+  accent-color: var(--ring);
+  cursor: pointer;
+}
+.listing-check strong {
+  font-weight: 600;
+}
+.listing-help {
+  display: block;
+  margin-top: 2px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+/* A scheduled post's banner in two rows (DESIGN §4): the time, its notes, and the controls that
+   act on it; then, under a hairline, where the post is going, on a slightly deeper ground. */
+.banner-split {
+  display: block;
+  padding: 0;
+  overflow: hidden;
+}
+.banner-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  font-size: 14px;
+}
+.banner-bottom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 16px;
+  border-top: 1px solid var(--status-scheduled-line);
+  /* A shade deeper than the banner, so the row reads as its footer rather than a strip of its own. */
+  background: color-mix(in srgb, var(--status-scheduled-fg) 6%, var(--status-scheduled-bg));
+  font-size: 13px;
+}
+.banner-bottom svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+.sched-dest-icon {
+  display: flex;
+  flex: none;
+}
+/* A filled icon takes the row's violet; a stroked one (fill="none") already draws in it. */
+.banner-bottom svg:not([fill="none"]),
+#settingsBtn svg {
+  fill: currentColor;
+}
+#schedDest {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sched-dest code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+.pub-taken code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--fg);
+}
+/* The settings form in a dialog under the time, set off from it by a rule. */
+.dialog-settings {
+  margin-top: 14px;
+  padding-top: 2px;
+}
+.dialog-settings .listing-check {
+  margin-top: 0;
+}
+/* The archive address as one URL field: the base greyed and fixed, then the slug, the one part
+   to type. The whole field is the label, so a click on the base lands in the slug too. */
+.pub-address {
+  margin-top: 14px;
+}
+.pub-label {
+  display: block;
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.url-field {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--card);
+  font-family: var(--mono);
+  font-size: 13px;
+  cursor: text;
+}
+.url-field:focus-within {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 1px var(--ring);
+}
+.url-field.is-invalid {
+  border-color: var(--danger-fg);
+}
+.url-base {
+  display: flex;
+  align-items: center;
+  padding: 8px 0 8px 10px;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.url-field input {
+  flex: 1;
+  min-width: 6em;
+  border: 0;
+  border-radius: 0;
+  padding: 8px 10px 8px 0;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+}
+.url-field input:focus-visible {
+  outline: none;
+}
+.url-field.readonly {
+  cursor: default;
+  background: var(--sunken);
+}
+.url-field.readonly input {
+  color: var(--muted);
+  font-weight: 500;
+  background: transparent;
+}
+@media (max-width: 480px) {
+  .url-field {
+    flex-direction: column;
+  }
+  .url-base {
+    padding-bottom: 0;
+  }
+  .url-field input {
+    padding-left: 10px;
+  }
+}
+/* A refused address, in the server's words, under its field. */
+.pub-error {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--danger-fg);
+}
+/* The Post settings button carries a gear before its words. */
+#settingsBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+#settingsBtn svg {
+  width: 16px;
+  height: 16px;
+}
+.pub-taken {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.pub-taken svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  margin-top: 2px;
+}
+.pub-note {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+/* A sent post's page in two parts (DESIGN §3): the post, then its delivery. */
+.rec-head-page {
+  margin-bottom: 14px;
+}
+.rec-part-title {
+  margin: 0 0 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.rec-web {
+  display: grid;
+}
+.rec-link-label {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+/* The link as one field: the address, then Copy and Open attached to it. */
+.rec-link {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--sunken);
+}
+/* An address is one line, shortened at its end, since Copy carries it whole. */
+.rec-link code {
+  flex: 1 1 auto;
+  align-self: center;
+  min-width: 0;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rec-link button {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 35px;
+  padding: 0 11px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--card);
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.rec-link button:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+.rec-link button.rec-open {
+  color: var(--accent);
+  font-weight: 500;
+}
+.rec-link-note {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+}
+/* Where the post stands, in words beside the one change it allows (which asks first). */
+.rec-arch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin: 14px -16px 0;
+  padding: 14px 16px 0;
+  border-top: 1px solid var(--line);
+}
+/* A post with no web link yet has only its standing to show, with no rule above it. */
+.rec-web > .rec-arch:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+.rec-arch-what {
+  flex: 1 1 220px;
+  min-width: 0;
+  font-size: 14px;
+}
+.rec-arch-what strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.rec-arch-what svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--muted);
+}
+.rec-arch-what svg:not([fill="none"]) {
+  fill: currentColor;
+}
+.rec-arch-note {
+  display: block;
+  margin-top: 2px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+/* The address Remove from archive takes down, struck through in its dialog. */
+.url-gone {
+  padding: 8px 10px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 620px) {
+  .tb {
+    width: 34px;
+    height: 34px;
+  }
+}
+
+/* Docs: the operator guide rendered natively (no iframe) — one doc per page in the
+   reference room's main column, beside that doc's scroll-spy "On this page" in the room
+   rail. Same reading model as the API reference. */
+.toc-label {
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+  padding: 0 10px;
+  margin-bottom: 8px;
+}
+/* "On this page": a <details> whose summary is the label. On desktop it is always open and
+   the summary is inert (no marker, no pointer), so it reads as a plain label over the list;
+   the ≤720px block turns it into a real fold. Flush at the top of the rail — it's the only
+   thing there. */
+.toc-onpage {
+  display: block;
+}
+.toc-onpage > summary {
+  list-style: none;
+  pointer-events: none;
+}
+.toc-onpage > summary::-webkit-details-marker {
+  display: none;
+}
+/* Block links (a <details> lays its children out as flow, not flex), 1px apart. */
+.toc-sub {
+  display: block;
+  margin-bottom: 1px;
+  text-decoration: none;
+  color: var(--muted);
+  font-size: 12.5px;
+  padding: 5px 10px;
+  border-radius: 0;
+}
+.toc-sub:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+/* The active section: color + the hover tint, never weight — a bolder link can wrap where
+   the regular one didn't, and the whole list would jump each time the spy moves. */
+.toc-sub.on {
+  color: var(--fg);
+  background: var(--hover);
+}
+
+/* Long-form prose, styled with the app's own tokens (no re-declared design system,
+   no iframe). Reusable for any markdown rendered in-app. */
+.doc {
+  max-width: 720px;
+  min-width: 0;
+  /* A runway below the pager so the last section can scroll up under the room bar and
+     be reached + highlighted (the scroll-spy also force-marks the last one at the
+     very bottom, as a fallback for a short final section). */
+  padding-bottom: 40vh;
+}
+.doc-part > :first-child {
+  margin-top: 0;
+}
+/* Doc headings are long-form, not the app's uppercase UI labels — reset the base
+   h2's transform/color/spacing that would otherwise cascade in. */
+.doc h1,
+.doc h2,
+.doc h3 {
+  color: var(--fg);
+  text-transform: none;
+}
+.doc {
+  --h1-size: 26px;
+}
+.doc h1 {
+  font-size: var(--h1-size);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  margin: 0 0 10px;
+  scroll-margin-top: calc(var(--bar-h) + 10px);
+}
+.doc h2 {
+  font-size: 19px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 30px 0 8px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  scroll-margin-top: calc(var(--bar-h) + 10px);
+}
+.doc h3 {
+  font-size: 15px;
+  font-weight: 650;
+  margin: 22px 0 6px;
+}
+.doc p,
+.doc li {
+  font-size: 15px;
+  line-height: 1.65;
+}
+.doc a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.doc ul,
+.doc ol {
+  padding-left: 22px;
+}
+.doc li {
+  margin: 4px 0;
+}
+/* GitHub task lists (`- [ ]` in the markdown): a disabled checkbox before the item.
+   The global input reset (full-width, border, padding) would blow it up, so restore
+   the native box and drop the list bullet so there's a single marker. */
+.doc li:has(> input[type="checkbox"]) {
+  list-style: none;
+}
+.doc input[type="checkbox"] {
+  width: auto;
+  margin: 0 8px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  vertical-align: middle;
+  accent-color: var(--ink);
+}
+.doc code {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--code-inline-fg);
+  background: var(--chip);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  padding: 1px 5px;
+}
+/* Bold in a doc sits between semibold and bold, the weight of its headings: the browser's
+   `bolder` makes it 700, which outweighs the headings (650) on the system font. */
+.doc strong {
+  font-weight: 650;
+}
+/* Code in a bold lead-in keeps its own weight: the chip already sets it apart. */
+.doc strong code {
+  font-weight: normal;
+}
+/* The inline-code chip above stays off the code in a block. */
+.doc pre code {
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: inherit;
+}
+/* Previous / Next pager at the foot of a doc — the sequential path, with titles. Two
+   bordered cards; a missing neighbour keeps its side empty so the lone card stays put. */
+.doc-pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 48px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+}
+/* The `.doc a` link style (blue + underline) out-specifies a bare `.doc-pager-btn`, so
+   scope the reset to `.doc a.doc-pager-btn` to keep these bordered cards plain. */
+.doc a.doc-pager-btn {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: 47%;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  color: inherit;
+  text-decoration: none;
+}
+.doc-pager-btn.next {
+  text-align: right;
+  align-items: flex-end;
+}
+.doc-pager-btn:hover {
+  background: var(--hover);
+  border-color: var(--muted);
+}
+.doc-pager-dir {
+  font-size: 12px;
+  color: var(--muted);
+}
+.doc-pager-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.doc blockquote {
+  margin: 16px 0;
+  padding: 2px 16px;
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+}
+.doc hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 32px 0;
+}
+/* A prose table is a bordered grid, not one of the app's card-style data tables, so
+   reset the card chrome the global `table` rule would otherwise lend it (a rounded
+   outer border + fill that fights the square cell grid) — the cell borders carry it. */
+.doc table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 16px 0;
+  display: block;
+  overflow-x: auto;
+  background: none;
+  border: 0;
+  border-radius: 0;
+}
+.doc th,
+.doc td {
+  border: 1px solid var(--line);
+  padding: 8px 12px;
+  text-align: left;
+  font-size: 14px;
+  vertical-align: top;
+}
+/* Re-close the grid's bottom edge. The global `tr:last-child td` rule drops the last
+   row's bottom border — right for a card table, which has its own outer border to close
+   it, but a prose grid has none, so that leak leaves the bottom open. Outranks the
+   global rule (extra `.doc`), restoring the cell border the grid draws itself from. */
+.doc tr:last-child td {
+  border-bottom: 1px solid var(--line);
+}
+.doc th {
+  background: var(--bg);
+  color: var(--fg);
+  font-weight: 600;
+}
+.doc img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* API reference: a rail of tiers and their resources beside the route list, rendered in
+   the reference room (the rail lives in the room rail, the routes in the room main). The
+   rail is dense on purpose: it is an index to scan, so its rows sit close. The filter
+   closes the intro, above the first tier, and narrows the whole list. */
+.api-filter {
+  position: relative;
+  max-width: 480px;
+  margin: 16px 0 0;
+}
+.api-filter > svg {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 15px;
+  height: 15px;
+  color: var(--muted);
+  pointer-events: none;
+}
+.api-filter input {
+  height: 38px;
+  padding: 0 38px 0 34px;
+  border-radius: 0;
+}
+/* The field's own clear control replaces the browser's, which sat inside the padding the
+   shortcut hint needs and drew in a different style per browser. */
+.api-filter input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+.api-filter kbd {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  font: 11px var(--mono);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  padding: 0 5px;
+  pointer-events: none;
+}
+.api-filter input:focus + kbd,
+.api-filter input:not(:placeholder-shown) + kbd {
+  display: none;
+}
+/* The Icon role, pinned inside the field's right edge (by top, not a transform, so the
+   role's pressed nudge doesn't fight the centering). */
+button.api-filter-clear {
+  position: absolute;
+  right: 5px;
+  top: 5px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+button.api-filter-clear svg {
+  width: 13px;
+  height: 13px;
+}
+.api-nav {
+  display: flex;
+  flex-direction: column;
+}
+.api-nav a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  text-decoration: none;
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.35;
+  padding: 3px 10px;
+  border-radius: 0;
+}
+.api-nav a.api-nav-tier {
+  color: var(--fg);
+  font-weight: 600;
+}
+.api-nav a.api-nav-tier ~ a.api-nav-tier {
+  margin-top: 8px;
+}
+.api-nav a.api-nav-res {
+  padding-left: 20px;
+}
+.api-nav a:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+/* Colour + tint, never weight, so the active row keeps its width (see .toc-sub.on). */
+.api-nav a.active {
+  color: var(--fg);
+  background: var(--hover);
+}
+/* The reference reads as a document: a doc page's line height, not the browser's default. */
+.api-content {
+  min-width: 0;
+  max-width: 1440px;
+  line-height: 1.5;
+}
+/* One reading measure for the page, a doc page's (720px): the intro, the topics, and each
+   route's and object's prose and tables keep it, and only a route's examples, beside its
+   prose on a wide screen, reach past it. */
+.api-head,
+.api-blurb,
+.api-section[data-tier="overview"] .api-res,
+.api-op-body {
+  max-width: 720px;
+}
+.api-head {
+  margin: 0 0 12px;
+}
+.api-head h1 {
+  margin: 0 0 4px;
+  font-size: 28px;
+}
+.api-section {
+  scroll-margin-top: calc(var(--bar-h) + 2px);
+  margin: 0 0 36px;
+}
+/* The last tier is at least a screen tall, so it can scroll up under the bar like every
+   other tier: its rail link lands it at the top and the scroll-spy can reach it. */
+.api-section.api-last {
+  min-height: calc(100vh - var(--bar-h));
+}
+/* A tier is a page heading here, not the app's small-caps section label that h2 is elsewhere. */
+.api-section h2 {
+  font-size: 24px;
+  font-weight: 650;
+  color: var(--fg);
+  text-transform: none;
+  letter-spacing: normal;
+  margin: 28px 0 4px;
+}
+/* Where a jump from the rail or an address moves focus: a place to read from, not a control,
+   so it takes no ring. */
+.api-section h2:focus,
+.api-res-head h3:focus {
+  outline: none;
+}
+.api-blurb {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+/* A resource: its heading over a rule, scrolling with its routes. */
+.api-res {
+  margin-top: 16px;
+  scroll-margin-top: var(--bar-h);
+}
+/* A resource's heading, set like the page's other headings, flush with the text: it only
+   pins under the bar, its vertical padding the band the rows scroll beneath. */
+.api-res-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--bg);
+}
+
+.api-res-head h3 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+}
+/* A Getting started topic is a heading over prose, not a list's head: no rule, a step smaller. */
+.api-section[data-tier="overview"] .api-res-head {
+  border-bottom: none;
+}
+.api-section[data-tier="overview"] .api-res-head h3 {
+  font-size: 18px;
+}
+.api-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.api-rows > li {
+  border-bottom: 1px solid var(--line);
+  /* A route reached from its address lands just under the bar, the rule above it hidden. */
+  scroll-margin-top: calc(var(--bar-h) - 1px);
+}
+/* The verb as a tinted label: its own --method-* color as text over a wash of itself. */
+.api-method {
+  text-align: center;
+  font: 700 11.5px / 1.7 var(--mono);
+  letter-spacing: 0.03em;
+  border-radius: 0;
+  color: var(--m);
+  background: color-mix(in srgb, var(--m) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--m) 28%, transparent);
+}
+.api-method.m-GET {
+  --m: var(--method-get);
+}
+.api-method.m-POST {
+  --m: var(--method-post);
+}
+.api-method.m-PUT {
+  --m: var(--method-put);
+}
+.api-method.m-DELETE {
+  --m: var(--method-delete);
+}
+/* An object heads its resource as a row of its own, marked in the verb's column. */
+.api-method.m-OBJECT {
+  text-transform: uppercase;
+  color: var(--muted);
+  background: var(--card);
+  box-shadow: inset 0 0 0 1px var(--line-soft);
+}
+.api-path {
+  font: 13.5px var(--mono);
+  overflow-wrap: anywhere;
+}
+.api-param {
+  color: var(--syntax-variable);
+  background: var(--syntax-variable-bg);
+  border-radius: 0;
+  padding: 0 2px;
+}
+.api-summary {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+.api-desc {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+/* A field or parameter the request can't do without. */
+.api-req {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--warn-fg);
+}
+
+.api-empty {
+  margin: 20px 0;
+}
+/* An object, first under the resource whose routes return it: a row like a route's, that
+   opens to its fields and example. */
+/* A route or an object, laid out in full as Stripe and Mux lay theirs: its name and tools,
+   its method and path, then what it does beside its examples on a wide screen, under them
+   on a narrow one. The examples scroll with the page: pinned, one taller than the window
+   (the send view's) would never show its end. */
+/* Each route and object its own block, with room around it so the page reads as one at a time. */
+.api-op {
+  padding: 36px 0 40px;
+}
+.api-op-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+.api-op-head h4 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+}
+.api-op-head h4:focus {
+  outline: none;
+}
+/* A heading is a link to its own address, in the heading's own ink, with a link icon in the
+   margin to its left while it is hovered or focused, as GitHub's headings show theirs. */
+a.api-self {
+  position: relative;
+  color: inherit;
+  text-decoration: none;
+}
+a.api-self svg {
+  position: absolute;
+  left: -20px;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  transform: translateY(-50%);
+  color: var(--muted);
+  opacity: 0;
+}
+a.api-self:hover svg,
+a.api-self:focus-visible svg {
+  opacity: 1;
+}
+.api-op-call {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 10px;
+}
+.api-op-call .api-method {
+  padding: 0 6px;
+}
+/* Copy sits right after the path it copies, an icon alone, so the two read as one. */
+button.copy-btn.api-copy-path {
+  padding: 3px 5px;
+}
+
+.api-op-body {
+  display: grid;
+  gap: 4px 28px;
+}
+.api-op-text,
+.api-op-code {
+  min-width: 0;
+}
+@media (min-width: 1280px) {
+  .api-op-body {
+    max-width: none;
+    /* The examples take what the window has beyond the prose's measure, never under 360px. */
+    grid-template-columns: minmax(0, 720px) minmax(360px, 1fr);
+  }
+  .api-op-code {
+    align-self: start;
+  }
+  .api-op-code > .block:first-child {
+    margin-top: 0;
+  }
+}
+/* The rail lists every route by name under its resource, so it reads as the page's contents. */
+.api-nav-ops {
+  display: none;
+}
+.api-nav-ops.open,
+.api-nav.filtering .api-nav-ops {
+  display: flex;
+  flex-direction: column;
+}
+.api-nav a.api-nav-op {
+  padding-left: 30px;
+  font-size: 13px;
+}
+.api-nav-tier + .api-nav-ops a.api-nav-op {
+  padding-left: 20px;
+}
+.api-object {
+  border-bottom: 1px solid var(--line);
+  /* Reached from a route's Returns, it lands just under the bar. */
+  scroll-margin-top: calc(var(--bar-h) - 1px);
+}
+/* Reference room on mobile. The bar stays ONE row at --bar-h, the same as on desktop, so
+   the in-page anchors (scroll-margin-top) and the scroll-spy line keep clearing it: the back
+   link is a --bar-h square holding its arrow, the wordmark and the two tabs follow, and the
+   ✕ drops (← is the way back). The body stacks, rail over content, and each rail takes the
+   shape its role wants: a doc's "On this page" folds to one tappable row; the API tiers and
+   the docs index's out-links become a chip row. The build stamp leaves the rail for the
+   room's foot, so it stays the last thing on the page rather than the first. */
+@media (max-width: 720px) {
+  .room-bar {
+    grid-template-columns: auto 1fr;
+  }
+  /* A --bar-h square: the arrow centred, the label gone. */
+  .room-back {
+    width: var(--bar-h);
+    justify-content: center;
+    padding: 0;
+    font-size: 16px;
+  }
+  .room-back-label {
+    display: none;
+  }
+  .room-nav {
+    padding: 0 12px;
+    gap: 14px;
+  }
+  .room-close,
+  .rail-foot {
+    display: none;
+  }
+  .room-foot {
+    display: block;
+  }
+  .room-body {
+    grid-template-columns: 1fr;
+  }
+  .room-rail {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  /* The rail is in the flow now, not pinned beside the article. */
+  .rail-inner {
+    position: static;
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
+    padding: 12px 6px; /* + the 10px on each link = the 16px content edge */
+  }
+  .room-main {
+    padding: 20px 16px 48px;
+  }
+  /* "On this page" as a real fold: the summary is the one row you see (label + chevron,
+     a 44px target), the section list opens under it. renderDocPage leaves it closed on
+     mobile and closes it again after a pick. */
+  .toc-onpage > summary {
+    pointer-events: auto;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 44px;
+    margin: 0;
+    padding: 0 10px;
+  }
+  .toc-onpage > summary::after {
+    content: "";
+    width: 7px;
+    height: 7px;
+    margin-right: 4px;
+    border-right: 2px solid var(--muted);
+    border-bottom: 2px solid var(--muted);
+    transform: rotate(45deg) translateY(-2px);
+    transition: transform 0.15s;
+  }
+  .toc-onpage[open] > summary::after {
+    transform: rotate(-135deg) translateY(-2px);
+  }
+  .toc-onpage[open] > summary {
+    margin-bottom: 4px;
+  }
+  .toc-sub {
+    font-size: 14px;
+    padding: 9px 10px;
+  }
+  /* Chip rows: the API tiers and the docs index's out-links. The index's three short
+     chips share the label's line; the API's three don't fit beside "API" at 375px,
+     so that label sits on its own line over the row. */
+  .rail-inner:has(.api-nav),
+  .rail-inner:has(.rail-link) {
+    gap: 6px 10px;
+    padding: 10px 12px;
+  }
+  .rail-inner:has(.rail-link) {
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .rail-inner:has(.api-nav) .toc-label,
+  .rail-inner:has(.rail-link) .toc-label {
+    margin: 0;
+    padding: 0;
+  }
+  .api-nav {
+    flex-flow: row wrap;
+    gap: 6px;
+  }
+  .api-nav a,
+  .rail-link {
+    border: 1px solid var(--line);
+    border-radius: 0;
+    min-height: 32px;
+    padding: 0 10px 0 12px;
+    font-size: 13px;
+  }
+  /* The API rail is the tier chips alone on a phone: its resources need the column the
+     rail no longer has. */
+  .api-filter {
+    max-width: none;
+  }
+  .api-nav a.api-nav-res,
+  .api-nav .api-nav-ops,
+  .api-nav.filtering .api-nav-ops {
+    display: none;
+  }
+  .api-nav a.api-nav-tier {
+    font-weight: 400;
+  }
+  .api-nav a.api-nav-tier ~ a.api-nav-tier {
+    margin-top: 0;
+  }
+  /* inline-flex centres the chip's text in its 32px; the gap stands in for the space
+     between the label and its ↗ that flex drops. */
+  .rail-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  /* Chips take the short labels ("Project", "Source") so the row fits one line. */
+  .rail-link-full {
+    display: none;
+  }
+  .rail-link-short {
+    display: inline;
+  }
+  /* The title-line pager keeps just its arrows, as two 44px-tall targets centred on the
+     31px title line (the overhang is hit area, not paint). */
+  .doc-topnav {
+    gap: 4px;
+  }
+  .doc .doc-topnav a {
+    width: 40px;
+    height: 44px;
+    margin-block: calc((var(--title-line) - 44px) / 2);
+    justify-content: center;
+    border-radius: 0;
+    font-size: 16px;
+  }
+  .doc .doc-topnav a:hover {
+    background: var(--hover);
+  }
+  .doc-topnav-word {
+    display: none;
+  }
+  /* Pager cards stack full-width and read left-to-right on mobile. */
+  .doc-pager {
+    flex-direction: column;
+  }
+  .doc a.doc-pager-btn {
+    max-width: none;
+  }
+  .doc-pager-btn.next {
+    text-align: left;
+    align-items: flex-start;
+  }
+}
+
+/* --- dashboard home + getting started --- */
+.dash-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.dash-head h1 {
+  margin: 0;
+}
+.dash-tagline {
+  margin: 4px 0 0;
+}
+.dash-section {
+  margin: 0 0 22px;
+  /* A grid item defaults to min-width:auto, which refuses to shrink below its
+     content — that let the pub cards' URLs and the tables push the page wider than
+     a mobile screen. min-width:0 lets the column shrink so the inner overflow-x / wrapping
+     takes over. */
+  min-width: 0;
+}
+.dash-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+@media (max-width: 720px) {
+  .dash-cols {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Health line: one calm status in the common case, loud only when something needs
+   attention (SPEC §8 / §11). */
+.health {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  padding: 12px 14px;
+  font-size: 14px;
+  margin-bottom: 20px;
+}
+.health > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.health-dot {
+  line-height: 1.45;
+}
+.health.amber {
+  color: var(--warn-fg);
+  border-color: var(--warn-line);
+  background: var(--warn-bg);
+}
+.health.red {
+  color: var(--danger-fg);
+  border-color: var(--danger-line);
+  background: var(--danger-bg);
+}
+/* A banner at the head of the watch (the provider refusing the account) takes the gap
+   below the header that the dispatch bar has when there is none. */
+.watch-card .health {
+  margin-top: 18px;
+}
+
+/* A wedged send on the Sends page: ambiguous in-flight deliveries that need an
+   operator decision (SPEC §11). The red health-banner palette, carrying the
+   resolve action on the right. */
+.stuck-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--danger-fg);
+  border-color: var(--danger-line);
+  background: var(--danger-bg);
+}
+.stuck-card .stuck-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.stuck-card strong {
+  color: var(--fg);
+}
+
+/* Subscriber snapshot tiles (Confirmed emphasized as "your audience"). */
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+@media (max-width: 640px) {
+  .tiles {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--card);
+  text-decoration: none;
+  color: var(--fg);
+  transition: border-color 0.12s;
+}
+.tile:hover {
+  border-color: var(--muted);
+}
+.tile-n {
+  font-size: 26px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.tile-label {
+  font-size: 13px;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+}
+.tile-sub {
+  font-size: 12px;
+}
+.tile-emph {
+  border-color: var(--ok-line);
+  background: var(--ok-bg);
+}
+.tile-emph .tile-n,
+.tile-emph .tile-sub {
+  color: var(--ok-fg);
+}
+/* On hover, each tile deepens its OWN resting border rather than jumping to a generic
+   grey — so the green Confirmed tile takes a green border matching its dark-green text,
+   not a mismatched neutral one. */
+.tile-emph:hover {
+  border-color: var(--ok-fg);
+}
+
+/* Recent-sends "Archive ↗" link + the drafts table live on the shared table styles. */
+.ghost-link {
+  font-size: 13px;
+  color: var(--muted);
+  text-decoration: none;
+}
+.ghost-link:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+
+/* Publication card: the home page's address with Copy, and the way out to it. */
+.pub-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.pub-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.pub-val {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  font: 13px var(--mono);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  padding: 6px 9px;
+}
+.pub-foot {
+  margin-top: 4px;
+}
+/* A card's foot links are its navigation, not a footnote: body size and the in-row link
+   weight (`td a`), a step above the 13px prose they sit under, so the navigable things
+   separate from the sentence by size and weight while keeping the quiet link color that
+   brightens on hover. Bigger than `.ghost-link`, which is subordinate to a table row. */
+.pub-foot a {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--muted);
+  text-decoration: none;
+}
+.pub-foot a:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+
+.quick-actions {
+  gap: 10px;
+}
+
+/* Setup steps: the first-run checklist, and the regular dashboard's Finish setting up card
+   (one component, two layouts). The card is the compact one. Finished steps fold into one
+   line above the list, behind a solid check; each step left carries a small ring beside its
+   title that says where it stands: plain to take, dashed while AWS has it, dotted while it
+   waits on another step, solid red while a problem above is in its way. */
+.setup-title {
+  margin-top: 0;
+}
+/* The done steps' toggle: one "N done" line that shows them in place in the list, and hides
+   them again. A plain text control, so it reads as a line of the card, not a button. */
+.setup-fold {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  margin: 10px 0 2px;
+  padding: 2px;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: 0;
+}
+.setup-fold:hover {
+  background: none;
+  color: var(--fg);
+}
+.setup-fold:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+/* A chevron that points down while the done steps are hidden and up while they show. */
+.setup-fold::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin: -3px 0 0 -4px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(45deg);
+}
+.setup-fold[aria-expanded="true"]::after {
+  margin-top: 3px;
+  transform: rotate(-135deg);
+}
+.setup-steps {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+/* Every row is as tall as one with a button, so a row with only a title, or no control, doesn't
+   read as squeezed beside its neighbours. */
+.setup-steps li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 59px;
+  box-sizing: border-box;
+  padding: 12px 2px;
+  border-top: 1px solid var(--line);
+}
+.setup-steps li:first-child {
+  border-top: 0;
+}
+/* The mark: beside the title's first line, whatever the hint below it. */
+.setup-fold-mark,
+.setup-steps li::before {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+.setup-fold-mark {
+  margin-top: 0;
+  align-self: center;
+}
+.setup-steps li::before {
+  content: "";
+  border: 1.5px solid var(--muted);
+}
+/* A step with only a title: the mark sits level with it, as the title does with its button. */
+.setup-steps li:not(:has(.setup-hint))::before {
+  align-self: center;
+  margin-top: 0;
+}
+/* Done: a solid check, in the fold's line and on each step it opens to. */
+.setup-fold-mark,
+.setup-steps li.setup-done::before {
+  content: "✓";
+  border: 0;
+  background: var(--ok-fg);
+  color: var(--card);
+}
+/* Waiting on AWS, not on the publisher. */
+.setup-steps li.setup-waiting::before {
+  border-style: dashed;
+  border-color: var(--accent);
+}
+/* Can't be taken until an earlier step is: muted, its hint the step it waits for. Its ring is
+   ten even dashes drawn by an SVG mask over the muted color, since a dotted border this small
+   renders as faint specks that vary with the screen. */
+.setup-steps li.setup-blocked::before {
+  border: 0;
+  background: var(--muted);
+  -webkit-mask:
+    url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7.25' fill='none' stroke='black' stroke-width='1.5' stroke-dasharray='2.4 2.155'/></svg>")
+    center / 100% 100% no-repeat;
+  mask:
+    url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7.25' fill='none' stroke='black' stroke-width='1.5' stroke-dasharray='2.4 2.155'/></svg>")
+    center / 100% 100% no-repeat;
+}
+.setup-steps li.setup-blocked strong {
+  color: var(--muted);
+  font-weight: 500;
+}
+/* A problem the health block states is in its way. */
+.setup-steps li.setup-attention::before {
+  content: "!";
+  color: var(--danger-on);
+  background: var(--danger-fg);
+  border-color: var(--danger-fg);
+}
+.setup-steps li.setup-attention .setup-hint {
+  color: var(--danger-fg);
+}
+/* A failed notification is an amber health line, so the step pointing at it is amber too. */
+.setup-steps li.setup-notify.setup-attention::before {
+  background: var(--warn-fg);
+  border-color: var(--warn-fg);
+  color: var(--card);
+}
+.setup-steps li.setup-notify.setup-attention .setup-hint {
+  color: var(--warn-fg);
+}
+.setup-step-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.setup-step-main strong {
+  font-size: 14px;
+}
+.setup-step-main .muted {
+  font-size: 13px;
+}
+.setup-steps li button {
+  flex: 0 0 auto;
+}
+/* The setup step's Copy keeps the step's button look, with the shared Copy's glyph. */
+.setup-steps li button[data-copy] {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.setup-steps li button[data-copy] svg {
+  width: 14px;
+  height: 14px;
+}
+.setup-url {
+  font: 12.5px var(--mono);
+  color: var(--muted);
+  word-break: break-all;
+}
+.setup-card {
+  margin-bottom: 20px;
+}
+.setup-card .setup-title {
+  font-size: 16px;
+  margin-bottom: 4px;
+}
+.setup-note {
+  margin: 0;
+}
+.setup-card .setup-steps li {
+  min-height: 51px;
+  padding: 8px 2px;
+}
+
+/* ============================================================
+   Settings page. Grouped by intent, made visible: each section
+   header carries an intent chip (Editable / Read-only · set at
+   deploy / Copy-out), editable surfaces sit on cards and read-only
+   facts on a recessed "sunken" card. Lettre's own accents use the
+   fixed --accent (a slate-blue), independent of the reader surface.
+   A sticky save bar collects every editable section's unsaved
+   changes; the logo saves on its own and doesn't feed it. Theme
+   follows the OS via the tokens at the top of this file.
+   ============================================================ */
+.settings {
+  max-width: 940px;
+}
+.settings .page-head {
+  margin-bottom: 6px;
+}
+/* A lead paragraph under the page title / each section: what it is and where it
+   shows up. Muted and measure-limited so it reads as guidance, not chrome. */
+.set-lede {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  margin: 0 0 16px;
+  max-width: 64ch;
+}
+.set-page-lede {
+  margin: 2px 0 26px;
+}
+
+/* --- section scaffold: uppercase title + intent chip(s) + a trailing rule --- */
+.set-sec {
+  margin-bottom: 34px;
+}
+
+/* --- copying text out of the app (DESIGN §7, ui/copy.ts) ---
+   A labelled block (a code block, or the API reference's query and content-type tables):
+   its label line, then the block. The Copy is a control outside the five roles: the word
+   and its glyph, no fill or border, quiet on the line it shares; the glyph turns to a
+   check in the ok hue for a moment once a copy has landed, and the word stays. A Copy
+   beside a single value (an address) is the same control. --- */
+.block {
+  margin-top: 10px;
+}
+.block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 8px 0 4px;
+}
+button.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 4px 8px;
+  border-radius: 0;
+}
+button.copy-btn:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+/* No pressed nudge: on a quiet word the button-wide half-pixel drop reads as a jump. */
+button.copy-btn:active {
+  transform: none;
+}
+/* A Copy that is its glyph alone (no word) takes no gap for the word. */
+button.copy-btn span:empty {
+  display: none;
+}
+button.copy-btn svg {
+  width: 14px;
+  height: 14px;
+}
+/* Any Copy that has just landed, whatever button it rides (ui/copy.ts). */
+button.copied svg {
+  color: var(--ok-fg);
+}
+.block-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+/* A code block (an example, a curl command, a template): a raised card with its label and Copy
+   in a header inside it, so the code stands apart from the page in both themes. */
+.code-block {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  overflow: hidden;
+}
+.code-block > .block-head {
+  margin: 0;
+  padding: 4px 6px 4px 12px;
+  border-bottom: 1px solid var(--line);
+}
+/* A bare code block (a doc's): the same raised card with no label line, the code beside a
+   Copy that is its glyph alone, level with the first line, so a one-line command reads as
+   one quiet row. */
+.code-bare {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  padding: 0 6px 0 0;
+}
+.code-bare pre {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow-x: auto;
+  padding: 11px 0 11px 14px;
+  font: 13px / 1.5 var(--mono);
+}
+.code-bare > button.copy-btn {
+  flex: none;
+  margin-top: 8px;
+  padding: 5px;
+}
+.code-bare > button.copy-btn svg {
+  width: 16px;
+  height: 16px;
+}
+/* A doc's code block is spaced like a paragraph. */
+.doc .code-bare {
+  margin: 14px 0;
+}
+.code-block pre {
+  margin: 0;
+  overflow-x: auto;
+  padding: 10px 12px;
+  font: 12.5px / 1.5 var(--mono);
+}
+/* A Copy beside a value keeps its size however long the value runs. */
+.pub-row button.copy-btn {
+  flex: 0 0 auto;
+}
+/* In a sent post's link field, Copy is a segment of the field like Open: square, full height,
+   and divided from the address, so its hover fills the segment rather than a chip inside it. */
+.rec-link button.copy-btn {
+  padding: 0 11px;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--card);
+}
+.rec-link button.copy-btn:hover {
+  background: var(--hover);
+}
+
+/* --- groups: the sections kept together by whom they serve (DESIGN §3). A group has no
+   heading, since each section's title already says what it is; a wider gap than the one
+   between sections is all that separates one group from the next. --- */
+.set-group + .set-group {
+  margin-top: 22px;
+}
+.set-sec-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 14px;
+}
+.set-sec-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+}
+.set-rule {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+/* Intent chips — the grouping made visible. Editable wears the Lettre accent;
+   read-only wears a warn tone; copy-out stays muted. Plain labels, so the default
+   cursor (DESIGN §11). */
+.set-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 9px 3px 7px;
+  border-radius: 0;
+  border: 1px solid var(--line-soft);
+  color: var(--muted);
+  background: var(--card);
+  white-space: nowrap;
+  cursor: default;
+}
+.set-chip svg {
+  width: 12px;
+  height: 12px;
+}
+.set-chip.editable {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line-soft));
+  background: var(--accent-soft);
+}
+/* In use by scheduled posts (SPEC §9): the scheduled violet, a lifecycle fact and not a
+   warning, the same reading as the scheduled badge (DESIGN §8). Adds no token. */
+.set-chip.inuse {
+  color: var(--status-scheduled-fg);
+  border-color: var(--status-scheduled-line);
+  background: var(--status-scheduled-bg);
+}
+.set-chip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.85;
+}
+/* Set at deploy: a fact about where the value lives, not a warning, so it stays neutral
+   rather than borrowing the amber `warn` scale (DESIGN §8). */
+.set-chip.readonly {
+  color: var(--muted);
+  border-color: var(--line);
+  background: var(--chip);
+}
+
+/* --- cards: editable surfaces raised, read-only facts recessed --- */
+.set-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  box-shadow: 0 1px 2px rgba(24, 24, 27, 0.04);
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+.set-card:last-child {
+  margin-bottom: 0;
+}
+.set-card.sunken {
+  background: var(--sunken);
+  border-color: var(--line-soft);
+  box-shadow: none;
+}
+.set-card-pad {
+  padding: 18px;
+}
+
+/* Lettre-accent links inside the settings cards (operator-guide links). */
+.set-link {
+  color: var(--accent);
+  font-weight: 550;
+  text-decoration: none;
+}
+.set-link:hover {
+  text-decoration: underline;
+}
+
+/* --- publication identity: a logo tile beside name + tagline --- */
+.set-id-grid {
+  display: grid;
+  grid-template-columns: 128px 1fr;
+  gap: 18px 22px;
+  padding: 20px;
+}
+.set-logo-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* The hint and the not-square warning stack in one column, under the tile on a wide
+   screen and beside it where the slot becomes a row. */
+.set-logo-notes {
+  min-width: 0;
+}
+.set-logo-tile {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 0;
+  border: 1px dashed var(--line-soft);
+  background: var(--sunken);
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  overflow: hidden;
+  cursor: pointer;
+  background-size: cover;
+  background-position: center;
+}
+.set-logo-tile.has-img {
+  border-style: solid;
+}
+.set-logo-tile:hover {
+  border-color: var(--accent);
+}
+.set-logo-ph {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  text-align: center;
+  padding: 8px;
+}
+.set-logo-ph svg {
+  width: 20px;
+  height: 20px;
+}
+.set-logo-actions {
+  display: flex;
+  gap: 6px;
+}
+.set-logo-actions button {
+  flex: 1;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+.set-field {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.set-field > label {
+  margin: 0 0 6px;
+  color: var(--fg);
+  font-weight: 600;
+  font-size: 13px;
+}
+.set-field + .set-field {
+  margin-top: 16px;
+}
+/* An optional field (the mailing address, SPEC §9): closed, it is an Add button over its
+   hint; open, its label row carries Remove, and a warning sits under the input while
+   what it holds doesn't reach the email. The warning takes the amber `warn` scale. */
+.set-addr-add {
+  align-items: flex-start;
+}
+.set-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 6px;
+}
+.set-field-head > label {
+  margin: 0;
+  color: var(--fg);
+  font-weight: 600;
+  font-size: 13px;
+}
+button.set-field-remove {
+  min-height: 0;
+  font-size: 12px;
+  padding: 3px 9px;
+}
+.set-field-warn {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--warn-line);
+  border-radius: 0;
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.set-id-fields {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- framed preview shell (sample email + inbox row) --- */
+.set-preview {
+  border: 1px solid var(--line);
+  border-radius: 0;
+  overflow: hidden;
+  background: var(--card);
+}
+.set-preview-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 11px 14px;
+  background: var(--sunken);
+  border-bottom: 1px solid var(--line);
+}
+.set-preview-lbl {
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.set-preview-dot {
+  font-size: 11px;
+  color: var(--muted);
+}
+.set-preview-cap {
+  padding: 9px 14px;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--card);
+  border-top: 1px solid var(--line);
+}
+
+/* --- read-only note bar + key/value facts (email sender, instance) --- */
+.set-ro-note {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--chip);
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.set-ro-note svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--muted);
+}
+.set-kv {
+  display: grid;
+  grid-template-columns: minmax(120px, 200px) 1fr;
+}
+.set-kv > div {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.set-kv > .set-kv-k {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 550;
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
+}
+.set-kv > .set-kv-v {
+  font-size: 13.5px;
+  overflow-x: auto;
+}
+/* A value with one quiet line of explanation under it (the From address and where replies go). */
+.set-kv > .set-kv-stack {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+.set-kv > div:nth-last-child(1),
+.set-kv > div:nth-last-child(2) {
+  border-bottom: 0;
+}
+.settings .mono {
+  font-family: var(--mono);
+  font-size: 13px;
+}
+/* A status pill in the settings reflection: a plain label, so the default cursor (DESIGN §11). */
+.set-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 0;
+  background: var(--chip);
+  color: var(--muted);
+  border: 1px solid var(--line-soft);
+  white-space: nowrap;
+  cursor: default;
+}
+.set-pill.ok {
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+  border-color: var(--ok-line);
+}
+/* SES still in its sandbox: worth a look, so amber (DESIGN §8). */
+.set-pill.warn {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  border-color: var(--warn-line);
+}
+/* Words in the settings reflection that are worth a look: the sandbox's limit, a denied review, a warning. */
+.settings .set-warn {
+  color: var(--warn-fg);
+}
+/* A provider warning that stops every email: red, beside the amber ones (DESIGN §8). */
+.settings .set-error {
+  color: var(--danger-fg);
+}
+/* A notification channel that has stopped delivering: red in the settings reflection. */
+.set-pill.danger {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  border-color: var(--danger-line);
+}
+.set-pill svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* Inbox preview: how the From line reaches a reader. */
+.set-inbox {
+  display: flex;
+  gap: 13px;
+  padding: 14px 16px;
+  align-items: flex-start;
+}
+.set-inbox-avatar {
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--chip);
+  color: var(--fg);
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 16px;
+  overflow: hidden;
+}
+.set-inbox-body {
+  min-width: 0;
+  flex: 1;
+}
+.set-inbox-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.set-inbox-from {
+  font-weight: 650;
+  font-size: 14px;
+}
+.set-inbox-time {
+  font-size: 12px;
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.set-inbox-subj {
+  font-size: 13.5px;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.set-inbox-snip {
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.set-inbox-addr {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-top: 5px;
+}
+
+/* --- confirmation email: the rendered card + the words-only edit body ---
+   The card colors are LITERALS matching src/emails/system.ts, which now ships light+dark
+   (its `prefers-color-scheme` block). The light literals are here; a dark @media block
+   below overrides them with the email's dark palette, so the preview tracks the dashboard
+   theme and stays byte-honest about what a light- or dark-mode inbox receives. */
+.set-ce-stage {
+  background: #f4f4f5;
+  padding: 22px 18px;
+}
+.set-ce-card {
+  max-width: 440px;
+  margin: 0 auto;
+  background: #ffffff;
+  border-radius: 8px;
+  padding: 28px 26px;
+  font-size: 15px;
+  line-height: 1.6;
+  color: #18181b;
+}
+.set-ce-msg {
+  margin: 0 0 20px;
+}
+/* Publication masthead inside the preview card, matching masthead() in
+   src/emails/system.ts (logo beside name + tagline, over a hairline rule). Light
+   literals here; the dark @media block below carries the dark overrides. */
+.set-ce-mast {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 22px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #e4e4e7;
+}
+.set-ce-mast-logo {
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  border-radius: 9px;
+  background: #18181b;
+  color: #ffffff;
+  display: grid;
+  place-items: center;
+  font:
+    600 20px / 1 Georgia,
+    "Times New Roman",
+    serif;
+  overflow: hidden;
+}
+.set-ce-mast-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.set-ce-mast-name {
+  font:
+    600 17px / 1.2 Georgia,
+    "Times New Roman",
+    serif;
+  color: #18181b;
+}
+.set-ce-mast-tag {
+  font-size: 13px;
+  color: #52525b;
+  margin-top: 2px;
+}
+/* Preview | Edit mode toggle — the section's primary control, so a touch larger and
+   more prominent than the plain width toggle, with a leading icon per mode. */
+.set-ce-modetog {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--line-soft);
+  border-radius: 0;
+  background: var(--sunken);
+}
+.set-ce-modebtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  background: transparent;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  border-radius: 0;
+  cursor: pointer;
+}
+.set-ce-modebtn svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+}
+.set-ce-modebtn:hover {
+  color: var(--fg);
+}
+.set-ce-modebtn[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--card);
+  box-shadow: 0 1px 2px rgba(24, 24, 27, 0.1);
+}
+.set-ce-btnrow {
+  margin: 0;
+}
+.set-ce-btn {
+  display: inline-block;
+  padding: 12px 20px;
+  background: #18181b;
+  color: #ffffff;
+  border-radius: 6px;
+  text-decoration: none;
+  font-size: 15px;
+  font-weight: 500;
+}
+.set-ce-foot {
+  color: #71717a;
+  font-size: 13px;
+  margin: 16px 0 0;
+}
+.set-ce-edit {
+  padding: 18px;
+}
+.set-ce-editfoot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--sunken);
+}
+.set-ce-editfoot .grow {
+  flex: 1;
+}
+/* Dark rendering of the preview card — the email's dark palette (the reader card pages'
+   tokens: page #18181b, card #232327, ink #ededed, muted #a1a1aa, rule #2e2e33, accent
+   button #e5e7eb/#18181b), matching the `prefers-color-scheme` block in
+   src/emails/system.ts. Overrides only the card literals; the edit body + chrome around
+   it already theme via the --* tokens. */
+:root[data-theme="dark"] .set-ce-stage {
+  background: #18181b;
+}
+:root[data-theme="dark"] .set-ce-card {
+  background: #232327;
+  color: #ededed;
+}
+:root[data-theme="dark"] .set-ce-mast {
+  border-bottom-color: #2e2e33;
+}
+:root[data-theme="dark"] .set-ce-mast-name {
+  color: #ededed;
+}
+:root[data-theme="dark"] .set-ce-mast-tag {
+  color: #a1a1aa;
+}
+:root[data-theme="dark"] .set-ce-btn {
+  background: #e5e7eb;
+  color: #18181b;
+}
+:root[data-theme="dark"] .set-ce-foot {
+  color: #a1a1aa;
+}
+
+/* --- default test recipients: removable chips + add row --- */
+.set-recip {
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.set-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.set-recip-empty {
+  font-size: 13px;
+  color: var(--muted);
+}
+.set-recip-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--chip);
+  border: 1px solid var(--line-soft);
+  border-radius: 0;
+  padding: 5px 6px 5px 12px;
+  font-size: 13px;
+  font-family: var(--mono);
+}
+.set-recip-chip button {
+  border: 0;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: var(--muted);
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  padding: 0;
+}
+.set-recip-chip button:hover {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+.set-recip-chip button svg {
+  width: 10px;
+  height: 10px;
+}
+.set-recip-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 420px;
+}
+.set-recip-add input {
+  flex: 1;
+}
+/* A refused address says why on its own line under the field and its button (DESIGN §5). */
+.set-recip-add .field-error {
+  flex-basis: 100%;
+  order: 1;
+  margin-top: 0;
+}
+
+/* --- ways to subscribe (DESIGN §3): one card, the two ways as bands in reading order,
+   the page then the form, split by a full-width rule like the other cards' bands. Each
+   band has the same head (a glyph, a title, one line) so they read as two options. The
+   card folds by the section's own width, since the sidebar decides how wide Settings is. --- */
+.set-sec-subscribe {
+  container-type: inline-size;
+}
+.set-way + .set-way {
+  border-top: 1px solid var(--line);
+}
+/* A control that switches what the band shows (the embed's Styled | Plain) sits at
+   the head's right end, as the reader pages' width toggle does. */
+.set-way-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px 16px;
+  padding: 18px 18px 0;
+}
+/* The name takes the room the control leaves, so the control keeps its size. */
+.set-way-name {
+  flex: 1 1 0;
+  min-width: 0;
+}
+/* Set like a field label, its glyph like a note's, so the band ranks with the other cards. */
+.set-way-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.set-way-title svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  fill: currentColor;
+  color: var(--muted);
+}
+.set-way-line {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.set-way-body {
+  padding: 10px 18px 18px;
+}
+/* The address is a value to copy, not a field: plain monospace, its Copy and Open beside it. */
+.set-way-addr {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  min-width: 0;
+}
+.set-addr {
+  font: 13.5px var(--mono);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+  margin-right: 4px;
+}
+/* The form as it will look beside the code that makes it, both always shown, edge to
+   edge in the card like the reader pages' outline beside its frame. The preview grows to
+   480px, near the styled form's own 460px cap, so it shows the form about as wide as a
+   site will; the code keeps 280px, so on a narrower card the preview gives way first. */
+.set-embed {
+  display: grid;
+  grid-template-columns: minmax(240px, 480px) minmax(280px, 1fr);
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.set-embed-preview {
+  display: flex;
+  align-items: center;
+  padding: 18px;
+  background: var(--sunken);
+  border-right: 1px solid var(--line);
+  min-width: 0;
+}
+.set-embed-preview > form {
+  width: 100%;
+}
+/* The code wraps rather than scrolling sideways, so the Styled snippet's long lines read
+   whole in the column; the copied text is unchanged. */
+.set-embed-code {
+  margin: 0;
+  min-width: 0;
+  padding: 12px 14px;
+  max-height: 220px;
+  overflow: auto;
+  font: 12px / 1.55 var(--mono);
+}
+.set-embed-code code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* The band ends in its one act: read top to bottom, choose, see the form and its code,
+   then copy. A strip across the card's foot, as Notifications ends in its test row. */
+.set-embed-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 18px;
+  border-top: 1px solid var(--line);
+}
+/* Copy HTML is Secondary with the shared Copy's word and glyph, as the setup step's is. */
+button.set-embed-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+button.set-embed-copy svg {
+  width: 14px;
+  height: 14px;
+}
+@container (max-width: 620px) {
+  /* No room beside the title: the toggle drops under the band's line, at its left. */
+  .set-way-head {
+    flex-direction: column;
+  }
+  .set-way-name {
+    flex-basis: auto;
+  }
+  .set-embed {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .set-embed-preview {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+}
+/* Rendered form previews (inert: they never submit here). The plain form is bare
+   markup, so it previews with the browser's own controls and inline flow, as a page
+   with no styles of its own would show it, never the admin's inputs. */
+.set-pf-plain,
+.set-pf-plain :is(label, input, button) {
+  all: revert;
+}
+.set-pf-plain input {
+  margin: 4px 4px 4px 0;
+}
+/* The styled form wears the hosted subscribe page's look (SPEC §5), at the snippet's own
+   sizes, so the preview is the form a publisher copies. */
+.set-pf-styled {
+  max-width: 460px;
+  font-size: 16px;
+}
+.set-pf-styled .l {
+  display: block;
+  font:
+    600 22px / 1.2 Georgia,
+    "Times New Roman",
+    serif;
+  letter-spacing: -0.01em;
+  margin-bottom: 12px;
+  color: var(--fg);
+}
+.set-pf-styled .rowf {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.set-pf-styled input {
+  flex: 1 1 220px;
+  min-width: 0;
+  padding: 11px 13px;
+  border-radius: 0;
+  font-size: 16px;
+}
+/* The styled subscribe-form preview shows reader-facing chrome, not an admin control,
+   so it isn't one of the five button roles, but it rides the neutral --ink token
+   (was a hardcoded near-black that vanished in dark mode) so it themes correctly. */
+.set-pf-styled .sub-btn {
+  flex: 0 0 auto;
+  padding: 11px 20px;
+  border-radius: 0;
+  background: var(--ink);
+  color: var(--ink-on);
+  border-color: var(--ink);
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.set-pf-fine {
+  margin: 12px 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+/* --- email template: a standalone sample-email frame, then a card holding
+   the HTML template editor and a collapsible variable reference. The example
+   templates are authored with a <style> block; the preview renders them in an
+   isolated iframe, so a template's own styles apply as a mail client would show
+   them and never leak into the dashboard. --- */
+.set-tpl-sample {
+  margin-bottom: 16px;
+}
+.set-tpl-block {
+  margin-top: 0;
+}
+.set-tpl-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.set-tpl-editor-head > label {
+  margin: 0;
+  color: var(--fg);
+  font-weight: 600;
+  font-size: 13px;
+}
+.set-tpl-examples {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.set-tpl-examples .lbl {
+  font-size: 12px;
+  color: var(--muted);
+}
+/* Syntax-highlight overlay editor: a transparent <textarea> over a
+   highlighted <pre>, plus a line-number gutter. All three share identical font
+   metrics so the caret sits exactly over the colored text; the textarea is the only
+   scroller and the gutter + overlay are synced to it in script. */
+.set-tpl-editor-wrap {
+  position: relative;
+  height: 420px;
+  min-height: 240px;
+  resize: vertical;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--syntax-bg);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  tab-size: 2;
+}
+.set-tpl-editor-wrap:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+.set-tpl-gutter,
+.set-tpl-hl,
+.set-tpl-editor {
+  margin: 0;
+  font: inherit;
+  line-height: inherit;
+  tab-size: inherit;
+  box-sizing: border-box;
+}
+.set-tpl-gutter {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 46px;
+  padding: 12px 8px 12px 0;
+  text-align: right;
+  white-space: pre;
+  overflow: hidden;
+  color: var(--syntax-gutter);
+  border-right: 1px solid var(--line);
+  user-select: none;
+  /* Line numbers are off by default; the toolbar toggle turns them on. */
+  display: none;
+}
+.set-tpl-hl {
+  position: absolute;
+  inset: 0;
+  padding: 12px 14px;
+  overflow: hidden;
+  white-space: pre;
+  color: var(--syntax-fg);
+  pointer-events: none;
+}
+.set-tpl-editor {
+  position: absolute;
+  inset: 0;
+  padding: 12px 14px;
+  border: 0;
+  resize: none;
+  white-space: pre;
+  overflow: auto;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--syntax-fg);
+}
+.set-tpl-editor:focus {
+  outline: none;
+}
+/* With line numbers on, reveal the gutter and inset the code + overlay past it. */
+.set-tpl-editor-wrap.show-lines .set-tpl-gutter {
+  display: block;
+}
+.set-tpl-editor-wrap.show-lines .set-tpl-hl,
+.set-tpl-editor-wrap.show-lines .set-tpl-editor {
+  left: 47px;
+}
+/* Syntax colors. */
+.cx-tag {
+  color: var(--syntax-tag);
+}
+.cx-str {
+  color: var(--syntax-string);
+}
+.cx-prop {
+  color: var(--syntax-property);
+}
+.cx-sel {
+  color: var(--syntax-selector);
+}
+.cx-num {
+  color: var(--syntax-number);
+}
+.cx-at {
+  color: var(--syntax-at-rule);
+  font-style: italic;
+}
+.cx-punct {
+  color: var(--syntax-punctuation);
+}
+.cx-var {
+  color: var(--syntax-variable);
+  background: var(--syntax-variable-bg);
+  border-radius: 0;
+  padding: 0 2px;
+  font-weight: 600;
+}
+/* Markdown token classes — the minimal scheme: the MARK carries the color, the
+   CONTENT keeps --syntax-fg and carries only weight/slant. So a bold word reads as weight, not
+   as a hue that competes with a heading. Heading text is bold with a crimson # mark; emphasis
+   asterisks are pink around plain weighted/slanted text; block markers (>, bullets, the fence
+   language) are orange; only a link's URL is treated; code sits on a --chip surface. */
+.cx-md-hmark {
+  color: var(--syntax-heading);
+  font-weight: 700;
+}
+.cx-md-htext {
+  font-weight: 700;
+}
+.cx-md-mark {
+  color: var(--syntax-emphasis);
+}
+.cx-md-strong {
+  font-weight: 700;
+}
+.cx-md-em {
+  font-style: italic;
+}
+.cx-md-bmark {
+  color: var(--syntax-quote);
+}
+.cx-md-url {
+  color: var(--syntax-property);
+  text-decoration: underline;
+}
+.cx-md-code {
+  color: var(--syntax-string);
+  background: var(--syntax-code-bg);
+  border-radius: 0;
+}
+.set-tpl-hint {
+  margin: 6px 0 0;
+}
+/* Advisory warnings about the just-saved template. A rejected save is a blocking
+   error and shows in the shared save bar instead (see .savebar.is-error). */
+.set-tpl-msgs {
+  margin-top: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 0;
+  padding: 9px 12px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.set-tpl-msgs.warn {
+  background: color-mix(in srgb, var(--warn-fg) 9%, transparent);
+  border-color: color-mix(in srgb, var(--warn-fg) 30%, var(--line-soft));
+  color: var(--warn-fg);
+}
+/* Variable reference — a native <details> disclosure. Logic-less: a token is only
+   ever replaced by its value, so there's nothing to execute. */
+.set-tpl-vars {
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--bg);
+}
+.set-tpl-vars > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 10px 14px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.set-tpl-vars > summary::-webkit-details-marker {
+  display: none;
+}
+.set-tpl-vars > summary::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform 0.15s;
+}
+.set-tpl-vars[open] > summary::before {
+  transform: rotate(45deg);
+}
+.set-tpl-vars-body {
+  padding: 2px 14px 14px;
+}
+.set-tpl-vargroup + .set-tpl-vargroup {
+  margin-top: 10px;
+}
+.set-tpl-vargroup h4 {
+  margin: 0 0 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.set-tpl-var {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 7px 0;
+  border-top: 1px solid var(--line-soft);
+}
+.set-tpl-vargroup h4 + .set-tpl-var {
+  border-top: 0;
+}
+.set-tpl-var code {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  /* Match the weight of the {{ tokens }} highlighted in the editor (.cx-var). */
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 0;
+  padding: 2px 6px;
+}
+.set-tpl-var-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+/* The sample email: a neutral email-client frame. The template's own inline styles
+   do the rest (an email carries no stylesheet), so there are no per-element rules
+   here — only safe container defaults. */
+/* The sample email renders in an isolated <iframe> — so the template's own <style>
+   block applies exactly as it would in a mail client and can't leak into the
+   dashboard, and the reading measure is constrained to the email column
+   (~640px, matching the view-in-browser render). Its height is sized to content
+   from script. */
+.set-email-frame {
+  display: block;
+  width: 100%;
+  min-height: 240px;
+  border: 0;
+  background: #ffffff;
+}
+
+/* --- Template page: sample-email header actions, dropdown, variables --- */
+.set-preview-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.set-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* Preview width toggle (640 / 375) — proof both inbox measures; 640 is the default. */
+.set-wtog {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line-soft);
+  border-radius: 0;
+  background: var(--card);
+}
+.set-wtog .wtog-btn {
+  border: 0;
+  background: transparent;
+  padding: 5px 11px;
+  font-size: 11.5px;
+  color: var(--muted);
+  border-radius: 0;
+  cursor: pointer;
+}
+.set-wtog .wtog-btn[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+/* Editor toolbar: the dropdown + small icon buttons (line-number toggle, copy). */
+.set-tpl-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.set-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  color: var(--muted);
+  background: var(--card);
+  border: 1px solid var(--line-soft);
+  border-radius: 0;
+  cursor: pointer;
+}
+.set-icon-btn svg {
+  width: 15px;
+  height: 15px;
+  /* As the button's only flex child it can otherwise collapse to 0 width. */
+  flex: 0 0 auto;
+}
+.set-icon-btn:hover {
+  color: var(--fg);
+  border-color: var(--muted);
+}
+.set-icon-btn[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line-soft));
+}
+/* Required-token pills: live green/red for the two tokens whose
+   absence blocks a save, shown upper-right of the editor toolbar. */
+.set-tpl-required {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.set-req-lbl {
+  font-size: 11px;
+  color: var(--muted);
+}
+.set-req-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 5px 9px;
+  border-radius: 0;
+  border: 1px solid var(--line-soft);
+  color: var(--muted);
+  cursor: default;
+}
+.set-req-pill .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.set-req-pill.ok {
+  color: var(--ok-fg);
+  border-color: color-mix(in srgb, var(--ok-fg) 38%, var(--line-soft));
+  background: color-mix(in srgb, var(--ok-fg) 10%, transparent);
+}
+.set-req-pill.ok .dot {
+  background: var(--ok-fg);
+}
+.set-req-pill.bad {
+  color: var(--danger-fg);
+  border-color: color-mix(in srgb, var(--danger-fg) 40%, var(--line-soft));
+  background: color-mix(in srgb, var(--danger-fg) 9%, transparent);
+}
+.set-req-pill.bad .dot {
+  background: var(--danger-fg);
+}
+/* The sample email sits on a sunken stage so the (width-capped) email card reads as a
+   message on a surface; the width toggle sets its max-width. */
+.set-email-stage {
+  display: flex;
+  justify-content: center;
+  padding: 16px;
+  background: var(--sunken);
+}
+.set-email-stage .set-email-frame {
+  width: 100%;
+  max-width: 640px;
+  /* Floor the auto-sized frame at the default template's height, so emptying or
+     shortening the template doesn't collapse the preview and yank the page scroll
+     (the frame can still grow taller for a longer template or the 375 measure). */
+  min-height: 392px;
+  border-radius: 0;
+  box-shadow: 0 1px 4px rgba(15, 18, 25, 0.1);
+  transition: max-width 0.16s ease;
+}
+/* "Start from example": the trigger of a shared menu (openMenu). */
+.set-menu-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.set-menu-caret {
+  width: 6px;
+  height: 6px;
+  border-right: 1.6px solid currentColor;
+  border-bottom: 1.6px solid currentColor;
+  transform: translateY(-1px) rotate(45deg);
+  opacity: 0.6;
+}
+/* Variables card heading. */
+.set-tpl-vartitle {
+  margin: 0 0 2px;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--fg);
+}
+.set-tpl-varhead {
+  margin-bottom: 6px;
+}
+.set-tpl-varcard .set-tpl-vars-body {
+  padding: 0;
+}
+/* The note at the foot of a card: what the section is for, or where it is set. */
+.set-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--line);
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.set-note svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--muted);
+}
+
+/* --- Reader pages: an outline of every page a reader can land on, beside one framed page ---
+   The journeys are the outline's headings, set like section titles and never controls;
+   the pages are its rows. A journey's steps are numbered on a thread, peers carry a dot,
+   and an off-path page carries a dashed branch mark. The section folds by its own width,
+   not the window's (the sidebar decides how wide Settings is): too narrow for the outline,
+   it becomes one grouped select, and the width toggle goes, since the frame is already
+   no wider than a phone. The page brings its own ground, so the frame has none. */
+.set-rp-sec {
+  container-type: inline-size;
+}
+.set-rp {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  overflow: hidden;
+}
+.set-rp-nav {
+  border-right: 1px solid var(--line);
+  background: var(--sunken);
+  padding: 14px 10px 18px;
+}
+.set-rp-journey + .set-rp-journey {
+  margin-top: 16px;
+}
+.set-rp-jhead {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 6px 6px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.set-rp-jhead svg {
+  width: 13px;
+  height: 13px;
+}
+.set-rp-journey.current .set-rp-jhead {
+  color: var(--fg);
+}
+.set-rp-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  position: relative;
+}
+/* The thread behind a journey's numbered steps, from the first mark to the last row. */
+.set-rp-list.steps::before {
+  content: "";
+  position: absolute;
+  left: 17px;
+  top: 14px;
+  bottom: 14px;
+  width: 1px;
+  background: var(--line-soft);
+}
+.set-rp-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  border-radius: 0;
+  padding: 5px 8px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--fg);
+  cursor: pointer;
+}
+.set-rp-item:hover {
+  background: var(--hover);
+}
+.set-rp-item[aria-current="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.set-rp-item.off {
+  color: var(--muted);
+}
+.set-rp-item.off[aria-current="true"] {
+  color: var(--accent);
+}
+.set-rp-mark {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  border: 1px solid var(--line-soft);
+  background: var(--card);
+  font-size: 10.5px;
+  font-weight: 650;
+  color: var(--muted);
+}
+.set-rp-item[aria-current="true"] .set-rp-mark {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.set-rp-item.off .set-rp-mark {
+  border-style: dashed;
+  background: transparent;
+}
+.set-rp-dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.set-rp-mark svg {
+  width: 11px;
+  height: 11px;
+}
+.set-rp-pick {
+  display: none;
+}
+.set-rp-pick select {
+  width: 100%;
+}
+.set-rp-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.set-rp-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.set-rp-crumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 3px;
+  font-size: 14px;
+  font-weight: 650;
+}
+.set-rp-crumb-j {
+  color: var(--muted);
+  font-weight: 500;
+}
+.set-rp-crumb-sep {
+  color: var(--line-soft);
+  font-weight: 400;
+}
+.set-rp-note {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  max-width: 60ch;
+}
+.set-rp .set-wtog {
+  flex: 0 0 auto;
+}
+.set-rp .wtog-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.set-rp .wtog-btn svg {
+  width: 13px;
+  height: 13px;
+}
+/* Where a reader meets the page, and that this one is a sample: the cue a strip inside
+   the page would otherwise carry, kept in the app's chrome around it. */
+.set-rp-at {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 10px;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.set-rp-at .mono {
+  overflow-wrap: anywhere;
+}
+.set-rp-stage.phone {
+  padding: 18px 12px;
+  background: var(--sunken);
+}
+.set-rp-frame {
+  display: block;
+  width: 100%;
+  min-height: 320px;
+  border: 0;
+}
+.set-rp-stage.phone .set-rp-frame {
+  width: 375px;
+  max-width: 100%;
+  margin: 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 0;
+}
+.set-rp-error {
+  margin: 0;
+  padding: 12px 16px;
+  font-size: 13px;
+  color: var(--danger-fg);
+}
+@container (max-width: 640px) {
+  .set-rp {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .set-rp-nav,
+  .set-rp .set-wtog {
+    display: none;
+  }
+  .set-rp-pick {
+    display: block;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--line);
+    background: var(--sunken);
+  }
+  .set-rp-stage.phone {
+    padding: 0;
+    background: none;
+  }
+  .set-rp-stage.phone .set-rp-frame {
+    width: 100%;
+    border: 0;
+    border-radius: 0;
+  }
+}
+
+/* --- shared unsaved-changes bar -------------------------------------------------
+   One full-width banner fixed to the bottom of the viewport, used by every surface
+   with an explicit save + a revertible baseline (Settings and the Template page).
+   It slides up only while there are unsaved changes, carries Save + Discard, and
+   doubles as the home for a rejected save's error (the bar stays up and says why).
+   The left offset tracks the sidebar — clearing the 240px full column or the 64px
+   icon rail — and collapses to edge-to-edge once the sidebar becomes the off-canvas
+   mobile drawer. The post editor keeps its own autosave + conflict model, so it does
+   NOT use this bar. Its Save is a Primary button — now brand-blue --accent app-wide
+   (DESIGN §7), so the bar needs no primary override of its own. --- */
+.savebar {
+  position: fixed;
+  /* Clears the full 240px sidebar; narrowed to the rail / drawer in the rules below. */
+  left: 240px;
+  right: 0;
+  bottom: 0;
+  z-index: var(--z-bar);
+  padding: 13px 0;
+  background: color-mix(in srgb, var(--card) 88%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-top: 1px solid var(--line-soft);
+  box-shadow: 0 -10px 30px -18px rgba(24, 24, 27, 0.4);
+  transform: translateY(120%);
+  transition: transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.savebar.show {
+  transform: translateY(0);
+}
+/* Center the contents on the same column as .content (1040px) so the message and
+   actions sit under the page, not out at the far edge of a wide monitor. */
+.savebar-inner {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 0 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.savebar-msg {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  font-size: 13.5px;
+}
+.savebar-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn-fg);
+  flex: 0 0 auto;
+}
+/* A rejected save turns the bar red and the dot into a danger mark. The state class
+   is `is-error`, NOT the bare `error` — a global `.error` alert component (a bordered,
+   rounded, padded red box) would otherwise match the bar and paint a stray red border
+   on the three sides the bar doesn't re-specify. */
+.savebar.is-error .savebar-msg {
+  color: var(--danger-fg);
+}
+.savebar.is-error .savebar-dot {
+  background: var(--danger-fg);
+}
+.savebar-acts {
+  display: flex;
+  gap: 9px;
+  flex: 0 0 auto;
+}
+/* While a page owns the bar, reserve room below the content so its last section
+   never hides behind the fixed bar (set for the page's whole life — no layout shift
+   as the bar slides in and out). */
+body.has-savebar .content {
+  padding-bottom: 96px;
+}
+@media (min-width: 540px) {
+  [data-nav="rail"] .savebar {
+    left: 64px;
+  }
+}
+@media (max-width: 539px) {
+  .savebar {
+    left: 0;
+  }
+  /* Stack on mobile: the message on its own row, the actions right-aligned below,
+     rather than cramming a message and two buttons onto one narrow line. */
+  .savebar-inner {
+    padding: 0 16px;
+    flex-wrap: wrap;
+  }
+  .savebar-msg,
+  .savebar-acts {
+    flex: 1 1 100%;
+  }
+  .savebar-acts {
+    justify-content: flex-end;
+  }
+  /* Room for the taller two-row bar (a wrapped error runs a couple of lines). */
+  body.has-savebar .content {
+    padding-bottom: 140px;
+  }
+}
+
+/* --- responsive --- */
+@media (max-width: 780px) {
+  .set-id-grid {
+    grid-template-columns: 1fr;
+  }
+  .set-logo-slot {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+  .set-logo-tile {
+    width: 96px;
+    flex: 0 0 96px;
+  }
+  .set-logo-actions {
+    flex-direction: column;
+  }
+}
+@media (max-width: 560px) {
+  .set-kv {
+    grid-template-columns: 1fr;
+  }
+  .set-kv > .set-kv-k {
+    border-right: 0;
+    border-bottom: 0;
+    padding-bottom: 2px;
+  }
+  .set-kv > .set-kv-v {
+    padding-top: 2px;
+  }
+  .set-kv > div:nth-last-child(2) {
+    border-bottom: 1px solid var(--line);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    /* biome-ignore lint/complexity/noImportantStyles: reduced-motion must override every component's own transition */
+    transition: none !important;
+    /* biome-ignore lint/complexity/noImportantStyles: and every looping animation (e.g. the Saving… cue's pulsing dot) */
+    animation: none !important;
+  }
+  /* The lock's nudge holds its tint for the class's lifetime instead of fading. */
+  .composer-foot-lock.nudge {
+    background: color-mix(in srgb, var(--warn-fg) 18%, transparent);
+  }
+}
+
+/* Mobile and the icon-rail range (≤720px): a list table can't fit its fixed columns
+   (Sent wants 428px, Drafts 480px; the rail leaves 412px at 540px), so a `.stacks` table
+   turns each row into a stacked entry — the lead cell (title / subject / email) on its own
+   line, then the rest as one muted meta line, then any delivery-failure note — on the same markup:
+   the cells are named and the labels are ::before/::after content, so the desktop table
+   and the mobile list are one render. Headers go, and the sort buttons with them; the
+   default order is what a mobile screen wants. A row's ⋯ menu pins to its top-right corner. */
+@media (max-width: 720px) {
+  .list-table.stacks,
+  .list-table.stacks tbody,
+  .list-table.stacks tr {
+    display: block;
+    min-width: 0;
+  }
+  .list-table.stacks colgroup,
+  .list-table.stacks thead {
+    display: none;
+  }
+  .list-table.stacks tr {
+    position: relative;
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .list-table.stacks tr:last-child {
+    border-bottom: 0;
+  }
+  .list-table.stacks td {
+    display: inline;
+    padding: 0;
+    border: 0;
+    font-size: 13px;
+    text-align: left;
+  }
+  .list-table.stacks td:first-child {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 14px;
+  }
+  .list-table.stacks.has-actions td:first-child {
+    padding-right: 36px;
+  }
+  .list-table.stacks td.act {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: auto; /* the desktop cell's 1% would clip the button once positioned */
+  }
+  .list-table.stacks td.num {
+    color: var(--muted);
+  }
+  /* A cell with nothing to say (a draft's empty "Scheduled") leaves the meta line. */
+  .list-table.stacks td.empty {
+    display: none;
+  }
+  /* Sent: when · N recipients · N delivered, then the delivery-failure note. */
+  .sent-table td.num::before {
+    content: " · ";
+  }
+  .sent-table td.recipients .n::after {
+    content: " recipients";
+  }
+  .sent-table td.delivered .n::after {
+    content: " delivered";
+  }
+  .sent-table .delivered-note {
+    margin-top: 5px;
+  }
+  /* Drafts: status pill · Sends <fire time> · edited <updated> — the schedule card's
+     and the dashboard's own words for those two dates. */
+  .posts-table td.when::before {
+    content: " · Sends ";
+  }
+  .posts-table td.updated::before {
+    content: " · edited ";
+  }
+}
+
+/* The Subscribers table has four fixed columns beside its email, so it runs out of room
+   well above phone width, and where depends on the sidebar (a rail up to 1024px, then
+   full), not the viewport. So it stacks by its own width, measured on its wrapper,
+   whenever the email would get less than about 250px: the same stacked row as the
+   phone layout above, repeated here because a container query can't share its rules. */
+.subs-wrap {
+  container-type: inline-size;
+}
+@container (max-width: 609px) {
+  .list-table.subs-table.stacks,
+  .list-table.subs-table.stacks tbody,
+  .list-table.subs-table.stacks tr {
+    display: block;
+    min-width: 0;
+  }
+  .list-table.subs-table.stacks colgroup,
+  .list-table.subs-table.stacks thead {
+    display: none;
+  }
+  .list-table.subs-table.stacks tr {
+    position: relative;
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .list-table.subs-table.stacks tr:last-child {
+    border-bottom: 0;
+  }
+  .list-table.subs-table.stacks td {
+    display: inline;
+    padding: 0;
+    border: 0;
+    font-size: 13px;
+    text-align: left;
+  }
+  .list-table.subs-table.stacks td:first-child {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 14px;
+    padding-right: 36px;
+  }
+  .list-table.subs-table.stacks td.act {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: auto;
+  }
+  .list-table.subs-table.stacks td.empty {
+    display: none;
+  }
+  /* Subscribers: status pill · joined <date>. */
+  .subs-table td.joined::before {
+    content: " · joined ";
+  }
+}
+
+/* --- Import (DESIGN §3, Import subscribers): the format before the file, the plan of the
+   file chosen with what the commit needs, then the result. Cards on the page ground, the
+   drop zone dashed so it reads as a place to put something. --- */
+.imp {
+  max-width: 820px;
+}
+.imp-card h2 {
+  margin: 0 0 10px;
+}
+/* Where the page moves focus after a plan, a re-plan, or the result: a place to read from,
+   not a control, so it takes no ring. */
+.imp-file:focus,
+.imp-act-error:focus,
+#impDoneHead:focus {
+  outline: none;
+}
+.imp-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.imp-card-head h2 {
+  margin: 0;
+}
+.imp-text {
+  font-size: 13.5px;
+  line-height: 1.55;
+  margin: 0 0 10px;
+}
+.imp-sample,
+.imp-ref {
+  font-size: 12.5px;
+  margin: 4px 0 8px;
+}
+.imp-sample td,
+.imp-ref td {
+  vertical-align: top;
+}
+.imp-sample td {
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+.imp-links {
+  margin-top: 10px;
+}
+.imp-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 26px 16px;
+  border: 2px dashed var(--line-soft);
+  border-radius: 0;
+  background: var(--card);
+  text-align: center;
+}
+.imp-drop.over {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.imp-drop > svg {
+  width: 22px;
+  height: 22px;
+  color: var(--muted);
+}
+.imp-drop-line {
+  margin: 0;
+  font-size: 13.5px;
+}
+.imp-drop .field-hint {
+  margin: 0;
+}
+.imp-file-error {
+  margin-top: 10px;
+}
+.imp-file-error .field-error {
+  margin: 0 0 10px;
+  font-size: 13.5px;
+}
+.imp-file-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.imp-file-name {
+  overflow-wrap: anywhere;
+}
+.imp-plain {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.imp-plain .field-hint {
+  flex-basis: 100%;
+  margin: 0;
+}
+.imp-plain-label {
+  font-size: 13.5px;
+}
+.imp-outcomes {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+.imp-outcomes li + li {
+  margin-top: 4px;
+}
+.imp-kept-head {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 14px 0 4px;
+}
+/* On Workers Free's limits, the advice to move to Workers Paid on a list past what Free suits,
+   on the Dashboard, the Subscribers screen, and an import's plan (DESIGN §4): the same amber
+   box the Schedule dialog gives D1's daily-writes warning. */
+.workers-plan {
+  color: var(--warn-fg);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  border-radius: 0;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 12px 0 0;
+}
+.imp-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  margin: 10px 0 0;
+  cursor: pointer;
+}
+.imp-check input {
+  width: auto;
+  margin: 3px 0 0;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+.imp-check + .field-error {
+  margin-left: 24px;
+}
+.imp-attest-hint {
+  margin: 6px 0 0 24px;
+}
+.imp-act-error {
+  margin-top: 14px;
+}
+.imp-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 14px;
+  margin-top: 18px;
+}
+/* A subscriber's page is titled with the address, so a long one breaks rather than widens
+   the head; the status pill and the flag sit beside it, as the roster draws them. */
+.sub-title {
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+.sub-page-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.sub-page-title .sub-pills {
+  white-space: nowrap;
+}
+/* Whether they receive posts: the page's first answer, under the head, in the record's
+   meta-line place; muted, with a green dot only when they do, as a confirmed pill is. */
+.sub-receives {
+  margin: -6px 0 14px;
+  font-size: 13.5px;
+  color: var(--muted);
+}
+.sub-receives.yes::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--ok-fg);
+}
+/* The import note: the card's own small print, outside a dialog's hint styles. */
+.sub-note {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.sub-sec .sub-meaning {
+  margin: 8px 0;
+  font-size: 13.5px;
+}
+.sub-sec p:last-child {
+  margin-bottom: 0;
+}
+.sub-sup-line,
+.sub-left-line {
+  margin: 0;
+}
+/* Sends is a table, and a table is already a card, so its section is no card of its own:
+   the label sits on the page above it, as the dashboard's sections do. */
+.sub-sends {
+  margin-top: 22px;
+}
+.sub-sends-table .c-out {
+  width: 160px;
+}
+.sub-sends-table .sub-send a {
+  font-weight: 500;
+}
+.sub-more {
+  margin-top: 12px;
+}
+/* The roster's address is its row's link, as a Sent row's subject is, in the text's color
+   since the whole row is the click target. */
+.subs-table a.sub-email {
+  color: inherit;
+}
+.imp-dl,
+.sub-dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0;
+  font-size: 13.5px;
+}
+.imp-dl dt,
+.sub-dl dt {
+  color: var(--muted);
+}
+.imp-dl dd,
+.sub-dl dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.sub-evidence {
+  margin: 0;
+  white-space: pre-wrap;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  padding: 8px 10px;
+  font: 12px / 1.5 var(--mono);
+}
+@media (max-width: 540px) {
+  .imp-dl,
+  .sub-dl {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+  .imp-dl dd,
+  .sub-dl dd {
+    margin-bottom: 8px;
+  }
+}
+
+/* Lettre workspace: a calm editorial surface for publishing. */
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: left;
+}
+.theme-toggle:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+.theme-toggle-icon {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  display: block;
+  background: currentColor;
+  mask: url("/theme-moon.svg") center / contain no-repeat;
+}
+:root[data-theme="dark"] .theme-toggle-icon {
+  mask-image: url("/theme-sun.svg");
+}
+@media (min-width: 540px) {
+  [data-nav="rail"] .theme-toggle {
+    justify-content: center;
+  }
+  [data-nav="rail"] .theme-toggle-label {
+    display: none;
+  }
+}
+.sidebar {
+  background: var(--bg);
+}
+.sidebar-inner {
+  padding-top: 24px;
+}
+.nav-primary {
+  gap: 4px;
+  margin-top: 16px;
+}
+.nav-primary a {
+  min-height: 40px;
+  border-radius: 0;
+  transition:
+    color 140ms ease,
+    background-color 140ms ease;
+}
+.nav-primary a[aria-current="page"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.content {
+  padding-top: 40px;
+}
+.dash-head h1 {
+  font-family: var(--font);
+  font-size: clamp(28px, 3vw, 38px);
+  font-weight: 400;
+  line-height: 1.1;
+  letter-spacing: -0.025em;
+}
+.dash-section > h2 {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+.card {
+  border-radius: 0;
+}
+button.primary,
+button.secondary {
+  border-radius: 0;
+}
+@media (max-width: 539px) {
+  .content {
+    padding-top: 24px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .nav-primary a {
+    transition: none;
+  }
+}
+
+/* Near-square controls and surfaces from the LetRetro UI system. */
+.table-wrap,
+.modal,
+input,
+textarea,
+select,
+.theme-toggle {
+  border-radius: 0;
+}
+.nav-primary a[aria-current="page"] {
+  background: var(--ink);
+  color: var(--ink-on);
+}
+button.primary:hover {
+  filter: none;
+  opacity: 0.9;
+}

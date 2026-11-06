@@ -1,0 +1,2 @@
+# Pin package versions exactly when upgrading.
+save-exact=true

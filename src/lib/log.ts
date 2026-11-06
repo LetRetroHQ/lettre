@@ -1,0 +1,209 @@
+/**
+ * Structured logging: one JSON object per line, so Workers Logs indexes every field and a
+ * send's timeline is one query on its `sendId` (SPEC §12). `LOG_EVENTS` is the catalog of
+ * every event and its level.
+ *
+ * Logs explain; the record decides. Nothing reads a log line to make a decision, so the
+ * helper is fire-and-forget: it never throws, never awaits, and is called only after the
+ * decision it describes has been made. Its only input from outside is the correlation id
+ * (`run`), minted once per sweep tick and per request by the entry point (`withRun`), so a
+ * tick's or a request's lines group together without every caller threading it through.
+ *
+ * No address, token, or credential goes in a field (the line SPEC §9 draws for settings).
+ * Field values are scalars only, so a row, an error object, or a recipient list can't be
+ * dumped whole, and every string is scrubbed on the way out, of anything address-shaped
+ * of any token in a URL, and of any AWS credential a signature error echoes back, so a
+ * provider's or an exception's own text (or a stack) can't carry one through either.
+ */
+
+import { AsyncLocalStorage } from "node:async_hooks";
+import { redactCredentials } from "./redact";
+
+export type LogLevel = "error" | "warn" | "info";
+
+/**
+ * Every event the Worker logs, and its level: the catalog an operator filters and alerts
+ * on, so a name here is public surface. A new event joins it with the level the rule on
+ * `log` gives it, and `log.error`, `log.warn`, and `log.info` each take only their own
+ * level's names, so a line can't name an event that isn't here or carry another level.
+ */
+export const LOG_EVENTS = {
+  // The sweep (SPEC §6).
+  "sweep.tick": "info",
+  "sweep.error": "error",
+  // A send's lifecycle (SPEC §6, §12).
+  "send.scheduled": "info",
+  "send.fired": "info",
+  "send.batch": "info",
+  "send.resumed": "info",
+  "send.completed": "info",
+  "send.canceled": "info",
+  "send.rescheduled": "info",
+  "send.halted": "warn",
+  "send.resolved": "warn",
+  "send.lease_lost": "warn",
+  "send.ambiguous": "error",
+  "send.wedged": "error",
+  "send.missed": "error",
+  "send.stuck": "error",
+  "send.error": "error",
+  // Receipts and the list they feed (SPEC §10).
+  "webhook.received": "info",
+  "receipt.applied": "info",
+  "suppression.added": "info",
+  "receipt.released": "info",
+  "receipt.dropped": "warn",
+  "receipt.release_error": "error",
+  "webhook.cert_unavailable": "warn",
+  "webhook.render_failed": "error",
+  "webhook.refused": "error",
+  // Telling the publisher (SPEC §8).
+  "notify.sent": "info",
+  "notify.failed": "warn",
+  "notify.error": "error",
+  // Joining, test emails, and the provider's answers to them (SPEC §5, §7).
+  "subscribe.confirmation_refused": "warn",
+  "subscribe.confirmation_unknown": "warn",
+  "subscribe.not_connected": "warn",
+  "provider.unrecognized": "warn",
+  "provider.bad_request": "warn",
+  // The provider's account, as the sweep's account check reads it (SPEC §13).
+  "provider.account_checked": "info",
+  "provider.pacing_unread": "warn",
+  "provider.account_error": "error",
+  // Whether email is getting out (SPEC §13).
+  "sending.refusing": "warn",
+  "sending.cleared": "info",
+  "sending.record_failed": "error",
+  "subscribe.closed": "warn",
+  "test.refused": "warn",
+  "test.unknown": "warn",
+  "subscribe.failed": "error",
+  // The list (SPEC §7).
+  "import.committed": "info",
+  "subscriber.complained": "info",
+  "subscriber.erased": "info",
+  "import.incomplete": "error",
+  // A sign-in Access let through that names neither a person nor a service token (SPEC §11).
+  "auth.unidentified": "warn",
+  // A tool call through the MCP server, and the refusal code of one that failed (SPEC §11).
+  "mcp.call": "info",
+  // Configuration and the schema (SPEC §9).
+  "schema.unchecked": "warn",
+  "settings.corrupt": "error",
+  "config.invalid": "error",
+  "schema.behind": "error",
+  // A failure nothing else handled.
+  "request.error": "error",
+  // The send simulation, in local development only (SPEC §10).
+  "sim.quota_spent": "info",
+  "sim.quota_lifted": "info",
+  "sim.request_lost": "info",
+  "sim.receipts_error": "error",
+} as const satisfies Record<string, LogLevel>;
+
+export type LogEvent = keyof typeof LOG_EVENTS;
+
+/** The events the catalog logs at `level`. */
+export type LogEventAt<L extends LogLevel> = {
+  [E in LogEvent]: (typeof LOG_EVENTS)[E] extends L ? E : never;
+}[LogEvent];
+
+/** A field's value: a scalar, never an object, so nothing is logged whole by accident.
+ *  `undefined` drops the field. */
+export type LogValue = string | number | boolean | null | undefined;
+
+/** The fields of one line besides `event` and `level`. The named ones are the stable
+ *  fields a query filters on; the rest are the event's own ids, counts, durations, enums,
+ *  and provider text. */
+export interface LogFields {
+  sendId?: string;
+  postId?: string;
+  provider?: string;
+  [field: string]: LogValue;
+}
+
+const runs = new AsyncLocalStorage<string>();
+
+/** Run `fn` with `run` as the correlation id of every line it logs, however deep. */
+export function withRun<T>(run: string, fn: () => T): T {
+  return runs.run(run, fn);
+}
+
+/** A fresh correlation id, for a sweep tick or a request with no `cf-ray`. */
+export function newRun(): string {
+  return crypto.randomUUID();
+}
+
+// An address anywhere in a string: the local part goes, the domain stays, so a provider's
+// "domain not verified" still says which domain while no subscriber is named. Wide on
+// purpose, since a miss leaks and an over-match only blurs a line: a quoted local part,
+// an `@` URL-encoded as `%40`, a domain in any script, a single label, or an IP literal.
+const ADDRESS =
+  /(?:"[^"\r\n]*"|[^\s<>"'(),;:@/?&=[\]]+?)(?:@|%40)(\[[^\]\s]*\]|[\p{L}\p{N}_-]+(?:\.[\p{L}\p{N}_-]+)*)/giu;
+// A token in a URL (`/unsubscribe?token=…`, `/confirm?token=…`), which would let whoever
+// reads the line act as that subscriber.
+const TOKEN = /([?&;]token=)[^&\s"'#<>]+/gi;
+
+/** A string with every address in it reduced to its domain, and every URL token and AWS
+ *  credential removed. */
+export function scrub(text: string): string {
+  return redactCredentials(text).replace(ADDRESS, "…@$1").replace(TOKEN, "$1…");
+}
+
+function emit(level: LogLevel, event: string, fields: LogFields): void {
+  try {
+    const line: Record<string, string | number | boolean | null> = { event, level };
+    const run = runs.getStore();
+    if (run) {
+      line.run = run;
+    }
+    for (const [name, value] of Object.entries(fields)) {
+      if (value === undefined || name === "event" || name === "level" || name === "run") {
+        continue;
+      }
+      line[name] = typeof value === "string" ? scrub(value) : value;
+    }
+    const text = JSON.stringify(line);
+    // The console method sets the level Workers Logs records, beside the `level` field.
+    // biome-ignore lint/suspicious/noConsole: the one place the Worker writes a log line.
+    (level === "error" ? console.error : level === "warn" ? console.warn : console.log)(text);
+  } catch {
+    // A log line is never worth failing the work it describes.
+  }
+}
+
+/**
+ * The logger. `event` is a dotted name from `LOG_EVENTS` (`send.batch`), which a new event
+ * joins. The level carries the meaning (SPEC §12), so pick it by this rule:
+ *   - `error`: something could mail a person twice (I4), a send that should have gone out
+ *     has not (missed, stuck, wedged), or a failure nothing else handled. Worth a look.
+ *   - `warn`: the app is waiting something out that it recovers from on its own (a halt,
+ *     a refusal, a lost lease, a notification to retry), but a person may want to know; and
+ *     a person's manual call on recipients whose fate was unknown (Resolve).
+ *   - `info`: the ordinary lifecycle, and the counts of work done.
+ * Work over many recipients is one line of counts, never a line each.
+ */
+export const log = {
+  error: (event: LogEventAt<"error">, fields: LogFields = {}): void => emit("error", event, fields),
+  warn: (event: LogEventAt<"warn">, fields: LogFields = {}): void => emit("warn", event, fields),
+  info: (event: LogEventAt<"info">, fields: LogFields = {}): void => emit("info", event, fields),
+};
+
+/**
+ * Who took an action, as the action's line carries it (SPEC §12): `principal`, the kind
+ * (`human` or `service`), and `client`, the client a person came through, absent on a service
+ * token. Never the email or the token's Client ID: the record keeps who acted (SPEC §11), and
+ * a line only has to answer what automation, or Claude, changed, each as one filter.
+ */
+export function whoActed(by: { kind: "human" | "service"; client?: string | null }): {
+  principal: "human" | "service";
+  client?: string;
+} {
+  return { principal: by.kind, client: by.kind === "human" ? (by.client ?? undefined) : undefined };
+}
+
+/** An error's message as a field value (scrubbed like any string on the way out). */
+export function errorText(err: unknown): string {
+  return String((err as Error)?.message ?? err);
+}

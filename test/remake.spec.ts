@@ -1,0 +1,536 @@
+import { createExecutionContext, SELF, waitOnExecutionContext } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { beforeEach, describe, expect, it } from "vitest";
+import type { AppEnv } from "../src/env";
+import worker from "../src/index";
+import { clearFakeOutbox, fakeOutbox } from "../src/providers/fake";
+import { sweep } from "../src/send/sweep";
+import { clearLogos, logoKeys, resetDatabase, seedConfirmed } from "./support/fixtures";
+import { AUTH, base, JSON_AUTH, PNG_1x1, readJson } from "./support/http";
+
+// A template or identity change re-makes every scheduled send at once, after the
+// client acknowledges them (SPEC §6, §9). One test per rule.
+
+/** A valid template whose footer carries `marker`, renders the name and (optionally) the
+ *  address, but not the logo, so a test can tell which branding a frozen copy is on. */
+const tpl = (marker: string, withAddress = false) =>
+  `<div>{{ .Post.Body }}<p class="foot">${marker} · {{ .Publication.Name }}${
+    withAddress ? " · {{ .Publication.Address }}" : ""
+  }</p><a href="{{ .Email.UnsubscribeURL }}">Unsubscribe</a></div>`;
+
+async function putSettings(patch: unknown): Promise<Response> {
+  return SELF.fetch(`${base}/api/settings`, {
+    method: "PUT",
+    headers: JSON_AUTH,
+    body: JSON.stringify(patch),
+  });
+}
+
+async function getSettings(): Promise<any> {
+  return readJson(await SELF.fetch(`${base}/api/settings`, { headers: AUTH }));
+}
+
+async function makeDraft(subject: string): Promise<string> {
+  const created = await readJson(
+    await SELF.fetch(`${base}/api/posts`, {
+      method: "POST",
+      headers: JSON_AUTH,
+      body: JSON.stringify({ subject, markdown: `# ${subject}\n\nbody of ${subject}` }),
+    }),
+  );
+  return created.post.id;
+}
+
+async function schedule(postId: string, msFromNow = 10 * 60 * 1000): Promise<any> {
+  const res = await SELF.fetch(`${base}/api/posts/${postId}/schedule`, {
+    method: "POST",
+    headers: JSON_AUTH,
+    body: JSON.stringify({ fire_at: new Date(Date.now() + msFromNow).toISOString() }),
+  });
+  expect(res.status).toBe(201);
+  return (await readJson(res)).send;
+}
+
+/**
+ * Send now, then age the send by a minute, so it stands inside the minimum lead. Its fire
+ * time is rounded up to the minute, so for its first seconds a send-now send can sit just
+ * outside the lead; a minute later it is inside for the rest of its window.
+ */
+async function sendNow(postId: string): Promise<any> {
+  const res = await SELF.fetch(`${base}/api/posts/${postId}/send`, {
+    method: "POST",
+    headers: AUTH,
+  });
+  expect(res.status).toBe(201);
+  const { send } = await readJson(res);
+  const fire_at = send.fire_at - 60_000;
+  await env.DB.prepare("UPDATE sends SET fire_at = ? WHERE id = ?").bind(fire_at, send.id).run();
+  return { ...send, fire_at };
+}
+
+/** The send's view, with its frozen email beside it (read at its own route). */
+async function getSend(id: string): Promise<any> {
+  const { send } = await readJson(await SELF.fetch(`${base}/api/sends/${id}`, { headers: AUTH }));
+  const html = await (await SELF.fetch(`${base}/api/sends/${id}/email`, { headers: AUTH })).text();
+  return { ...send, rendered_html: html };
+}
+
+async function cancel(id: string): Promise<void> {
+  expect(
+    (await SELF.fetch(`${base}/api/sends/${id}/cancel`, { method: "POST", headers: AUTH })).status,
+  ).toBe(200);
+}
+
+// The rules are about "every scheduled send", so each test starts from none.
+beforeEach(async () => {
+  await resetDatabase();
+  await clearLogos();
+  clearFakeOutbox();
+  expect((await putSettings({ email_template: tpl("v1") })).status).toBe(200);
+});
+
+describe("a template or identity change re-makes the scheduled emails", () => {
+  it("a template save with scheduled sends is refused (409 remake_required) listing them, and changes nothing", async () => {
+    const a = await schedule(await makeDraft("Post A"));
+    const b = await schedule(await makeDraft("Post B"), 20 * 60 * 1000);
+
+    const res = await putSettings({ email_template: tpl("v2") });
+    expect(res.status).toBe(409);
+    const body = await readJson(res);
+    expect(body.error).toBe("remake_required");
+    expect(body.sends.map((s: any) => s.id)).toEqual([a.id, b.id]); // soonest first
+    // Each as its full send view, the one shape a send has (docs/API.md, principle 2).
+    expect(body.sends[0]).toMatchObject({
+      post_id: a.post_id,
+      subject: "Post A",
+      remade_at: null,
+      status: "scheduled",
+      phase: "scheduled",
+    });
+    const { send: view } = await readJson(
+      await SELF.fetch(`${base}/api/sends/${a.id}`, { headers: AUTH }),
+    );
+    expect(Object.keys(body.sends[0]).sort()).toEqual(Object.keys(view).sort());
+
+    expect((await getSettings()).settings.email_template).toBe(tpl("v1"));
+    for (const id of [a.id, b.id]) {
+      const s = await getSend(id);
+      expect(s.rendered_html).toContain("v1");
+      expect(s.remade_at).toBeNull();
+    }
+  });
+
+  it("an acknowledged template save re-makes every scheduled send at once, keeps the window, and reports what was re-made", async () => {
+    const a = await schedule(await makeDraft("Post A"));
+    const b = await schedule(await makeDraft("Post B"), 20 * 60 * 1000);
+
+    const res = await putSettings({ email_template: tpl("v2"), remake: [a.id, b.id] });
+    expect(res.status).toBe(200);
+    const body = await readJson(res);
+    expect(body.remade.map((s: any) => s.id)).toEqual([a.id, b.id]);
+    expect(body.remade[0].remade_at).toBeGreaterThan(0);
+
+    for (const before of [a, b]) {
+      const after = await getSend(before.id);
+      expect(after.rendered_html).toContain("v2");
+      expect(after.rendered_html).not.toContain("v1");
+      expect(after.rendered_html).toContain(`body of ${before.subject}`); // the content is the locked content
+      expect(after.status).toBe("scheduled");
+      expect(after.fire_at).toBe(before.fire_at);
+      expect(after.scheduled_at).toBe(before.scheduled_at);
+      expect(after.audience.count).toBe(before.audience.count);
+      expect(after.remade_at).toBe(body.remade[0].remade_at);
+    }
+    // The post's reference moves to the re-made send's rev, and the send list carries the mark.
+    const post = await readJson(
+      await SELF.fetch(`${base}/api/posts/${a.post_id}`, { headers: AUTH }),
+    );
+    expect(post.post.send).toEqual({
+      id: a.id,
+      status: "scheduled",
+      fire_at: a.fire_at,
+      rev: body.remade[0].rev,
+    });
+    const list = await readJson(
+      await SELF.fetch(`${base}/api/sends?status=scheduled`, { headers: AUTH }),
+    );
+    expect(list.sends.find((s: any) => s.id === a.id).remade_at).toBe(body.remade[0].remade_at);
+  });
+
+  it("an identity change the template renders re-makes the same way, and so do the logo upload and delete", async () => {
+    const a = await schedule(await makeDraft("Post A"));
+
+    const refused = await putSettings({ publication: { name: "Renamed" } });
+    expect(refused.status).toBe(409);
+    expect((await readJson(refused)).error).toBe("remake_required");
+    const ok = await putSettings({ publication: { name: "Renamed" }, remake: [a.id] });
+    expect(ok.status).toBe(200);
+    expect((await readJson(ok)).remade.map((s: any) => s.id)).toEqual([a.id]);
+    expect((await getSend(a.id)).rendered_html).toContain("Renamed");
+
+    // The logo: the template renders it (an <img> of the logo url is not in tpl(), so
+    // switch to one that does), then upload without and with the acknowledgement.
+    const withLogo = `${tpl("v1")}<img src="{{ .Publication.LogoURL }}">`;
+    expect((await putSettings({ email_template: withLogo, remake: [a.id] })).status).toBe(200);
+    const fd = () => {
+      const f = new FormData();
+      f.append("file", new File([PNG_1x1], "logo.png", { type: "image/png" }));
+      return f;
+    };
+    const up = await SELF.fetch(`${base}/api/settings/logo`, {
+      method: "POST",
+      headers: AUTH,
+      body: fd(),
+    });
+    expect(up.status).toBe(409);
+    expect((await readJson(up)).error).toBe("remake_required");
+    // A refused upload wrote no bytes.
+    expect(await logoKeys()).toEqual([]);
+
+    const upOk = await SELF.fetch(`${base}/api/settings/logo?remake=${a.id}`, {
+      method: "POST",
+      headers: AUTH,
+      body: fd(),
+    });
+    expect(upOk.status).toBe(200);
+    const upBody = await readJson(upOk);
+    expect(upBody.remade.map((s: any) => s.id)).toEqual([a.id]);
+    const [key] = await logoKeys();
+    expect((await getSend(a.id)).rendered_html).toContain(`/media/${key}"`);
+
+    const del = await SELF.fetch(`${base}/api/settings/logo`, { method: "DELETE", headers: AUTH });
+    expect(del.status).toBe(409);
+    const delOk = await SELF.fetch(`${base}/api/settings/logo?remake=${a.id}`, {
+      method: "DELETE",
+      headers: AUTH,
+    });
+    expect(delOk.status).toBe(200);
+    expect((await getSend(a.id)).rendered_html).not.toContain("/media/branding/logo");
+  });
+
+  it("an identical save changes nothing and asks nothing", async () => {
+    const a = await schedule(await makeDraft("Post A"));
+    // The same template text again.
+    const same = await putSettings({ email_template: tpl("v1") });
+    expect(same.status).toBe(200);
+    expect((await readJson(same)).remade).toEqual([]);
+    // A name equal to the From display name over a blank one resolves to the same
+    // branding (the From address in the test config carries no display name, so the
+    // resolved name is "" either way: an explicit "" is no change).
+    const blank = await putSettings({ publication: { name: "" } });
+    expect(blank.status).toBe(200);
+    expect((await readJson(blank)).remade).toEqual([]);
+    expect((await getSend(a.id)).remade_at).toBeNull();
+  });
+
+  it("a save that touches only test recipients or the confirmation email asks nothing even with scheduled sends", async () => {
+    const a = await schedule(await makeDraft("Post A"));
+    const res = await putSettings({
+      test_recipients: ["me@example.com"],
+      confirmation_email: { subject: "Confirm, please" },
+    });
+    expect(res.status).toBe(200);
+    expect((await readJson(res)).remade).toEqual([]);
+    expect((await getSend(a.id)).remade_at).toBeNull();
+    expect((await getSettings()).settings.test_recipients).toEqual(["me@example.com"]);
+  });
+
+  it("an identity field the template does not render re-makes nothing and asks nothing, even inside the lead", async () => {
+    const a = await schedule(await makeDraft("Post A"));
+    const soon = await sendNow(await makeDraft("Correction")); // inside the lead for its whole window
+    // tpl() does not render the address.
+    const res = await putSettings({ publication: { address: "12 Marsh Lane" } });
+    expect(res.status).toBe(200);
+    expect((await readJson(res)).remade).toEqual([]);
+    expect((await getSend(a.id)).rendered_html).not.toContain("12 Marsh Lane");
+    expect((await getSettings()).settings.publication.address).toBe("12 Marsh Lane");
+    expect((await getSettings()).in_use.identity_fields).toEqual(["name"]);
+
+    // Once the template renders the address, the same change asks.
+    await cancel(soon.id);
+    expect((await putSettings({ email_template: tpl("v1", true), remake: [a.id] })).status).toBe(
+      200,
+    );
+    expect((await getSettings()).in_use.identity_fields).toEqual(["name", "address"]);
+    const asks = await putSettings({ publication: { address: "13 Marsh Lane" } });
+    expect(asks.status).toBe(409);
+    expect((await readJson(asks)).error).toBe("remake_required");
+  });
+
+  it("a scheduled send's frozen text part carries the address exactly when its frozen HTML does, and follows a re-make (SPEC §9)", async () => {
+    const text = async (id: string) =>
+      (await SELF.fetch(`${base}/api/sends/${id}/email?format=text`, { headers: AUTH })).text();
+    const a = await schedule(await makeDraft("Post A"));
+    // tpl() does not render the address, so neither part carries it.
+    expect((await putSettings({ publication: { address: "12 Marsh Lane" } })).status).toBe(200);
+    expect(await text(a.id)).not.toContain("12 Marsh Lane");
+
+    // Once the template renders it, the re-made copy carries it in both parts.
+    expect((await putSettings({ email_template: tpl("v1", true), remake: [a.id] })).status).toBe(
+      200,
+    );
+    expect((await getSend(a.id)).rendered_html).toContain("12 Marsh Lane");
+    expect(await text(a.id)).toMatch(/\n12 Marsh Lane\n$/);
+
+    // An address change re-makes the text part too, never leaving the old address behind.
+    expect(
+      (await putSettings({ publication: { address: "13 Marsh Lane" }, remake: [a.id] })).status,
+    ).toBe(200);
+    const after = await text(a.id);
+    expect(after).toMatch(/\n13 Marsh Lane\n$/);
+    expect(after).not.toContain("12 Marsh Lane");
+  });
+
+  it("is refused while any scheduled send is inside the minimum lead (409 remake_too_close), even when acknowledged, with retry_after; nothing changes", async () => {
+    const a = await schedule(await makeDraft("Post A"));
+    const soon = await sendNow(await makeDraft("Correction"));
+
+    const res = await putSettings({ email_template: tpl("v2"), remake: [a.id, soon.id] });
+    expect(res.status).toBe(409);
+    const body = await readJson(res);
+    expect(body.error).toBe("remake_too_close");
+    expect(body.retry_after).toBe(soon.fire_at);
+    expect(body.sends.map((s: any) => s.id)).toEqual([soon.id]);
+    expect(body.message).toMatch(/Correction/);
+    expect((await getSettings()).settings.email_template).toBe(tpl("v1"));
+    expect((await getSend(a.id)).rendered_html).toContain("v1");
+    expect((await getSettings()).in_use.retry_after).toBe(soon.fire_at);
+
+    // Once the send inside the lead is gone, the same save goes through.
+    await cancel(soon.id);
+    const ok = await putSettings({ email_template: tpl("v2"), remake: [a.id] });
+    expect(ok.status).toBe(200);
+    expect((await readJson(ok)).remade.map((s: any) => s.id)).toEqual([a.id]);
+  });
+
+  it("never touches a send that is sending, sent, or canceled", async () => {
+    await seedConfirmed("reader@example.com");
+    const sent = await schedule(await makeDraft("Sent post"));
+    await env.DB.prepare("UPDATE sends SET fire_at = ? WHERE id = ?")
+      .bind(Date.now() - 1000, sent.id)
+      .run();
+    await sweep(env);
+    expect((await getSend(sent.id)).status).toBe("sent");
+    const canceled = await schedule(await makeDraft("Canceled post"));
+    await cancel(canceled.id);
+    // A send in flight: past the window, so neither listed nor re-made.
+    const sending = await schedule(await makeDraft("Sending post"));
+    await env.DB.prepare("UPDATE sends SET status = 'sending', started_at = ? WHERE id = ?")
+      .bind(Date.now(), sending.id)
+      .run();
+    const kept = await schedule(await makeDraft("Kept post"));
+    expect((await getSettings()).in_use.sends.map((s: any) => s.id)).toEqual([kept.id]);
+
+    const res = await putSettings({ email_template: tpl("v2"), remake: [kept.id] });
+    expect(res.status).toBe(200);
+    expect((await readJson(res)).remade.map((s: any) => s.id)).toEqual([kept.id]);
+    for (const id of [sent.id, canceled.id, sending.id]) {
+      const s = await getSend(id);
+      expect(s.rendered_html).toContain("v1");
+      expect(s.remade_at).toBeNull();
+    }
+    expect((await getSend(kept.id)).rendered_html).toContain("v2");
+  });
+
+  it("moving the fire time leaves the re-made copy and its mark alone (SPEC §6)", async () => {
+    const a = await schedule(await makeDraft("Post A"));
+    const body = await readJson(await putSettings({ email_template: tpl("v2"), remake: [a.id] }));
+    const moved = await SELF.fetch(`${base}/api/sends/${a.id}/reschedule`, {
+      method: "POST",
+      headers: JSON_AUTH,
+      body: JSON.stringify({ fire_at: new Date(Date.now() + 40 * 60 * 1000).toISOString() }),
+    });
+    expect(moved.status).toBe(200);
+    const after = await getSend(a.id);
+    expect(after.fire_at).not.toBe(a.fire_at);
+    expect(after.rendered_html).toContain("v2");
+    expect(after.remade_at).toBe(body.remade[0].remade_at);
+  });
+
+  it("an acknowledgement that omits a scheduled send is refused with the current list", async () => {
+    const a = await schedule(await makeDraft("Post A"));
+    const listed = (await getSettings()).in_use.sends.map((s: any) => s.id);
+    expect(listed).toEqual([a.id]);
+    const b = await schedule(await makeDraft("Post B")); // scheduled after the client looked
+
+    const res = await putSettings({ email_template: tpl("v2"), remake: listed });
+    expect(res.status).toBe(409);
+    const body = await readJson(res);
+    expect(body.error).toBe("remake_required");
+    expect(body.sends.map((s: any) => s.id).sort()).toEqual([a.id, b.id].sort());
+    expect((await getSettings()).settings.email_template).toBe(tpl("v1"));
+    expect((await getSend(a.id)).rendered_html).toContain("v1");
+  });
+
+  it("a schedule that lands before a template save holds the save off, and stays on the template in use", async () => {
+    const postId = await makeDraft("First");
+    const send = await schedule(postId);
+    // The client looked before the send existed, so its acknowledgement lists nothing.
+    const save = await putSettings({ email_template: tpl("v2"), remake: [] });
+    expect(save.status).toBe(409);
+    expect((await readJson(save)).sends.map((s: any) => s.id)).toEqual([send.id]);
+    expect((await getSettings()).settings.email_template).toBe(tpl("v1"));
+    expect((await getSend(send.id)).rendered_html).toContain("v1");
+  });
+
+  it("a schedule that lands after a template save renders with the saved template", async () => {
+    const postId = await makeDraft("Second");
+    expect((await putSettings({ email_template: tpl("v2"), remake: [] })).status).toBe(200);
+    const send = await schedule(postId);
+    const html = (await getSend(send.id)).rendered_html;
+    expect(html).toContain("v2");
+    expect(html).not.toContain("v1");
+  });
+
+  it("a schedule sent alongside a template save ends on the template in use, whichever lands first", async () => {
+    // The two orders are pinned one by one above. Here both requests are in flight at once,
+    // and which lands first is up to the runtime, so the test can't choose the outcome; it
+    // holds only that the end state is one of the two consistent ones, never a scheduled
+    // send on v1 under a saved v2.
+    const postId = await makeDraft("Racer");
+    const [sched, save] = await Promise.all([
+      SELF.fetch(`${base}/api/posts/${postId}/schedule`, {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ fire_at: new Date(Date.now() + 600_000).toISOString() }),
+      }),
+      putSettings({ email_template: tpl("v2"), remake: [] }),
+    ]);
+    expect(sched.status).toBe(201);
+    const send = await getSend((await readJson(sched)).send.id);
+    const in_use = (await getSettings()).settings.email_template;
+    // The save's answer and the template in use agree, and the send carries that template.
+    const marker = in_use === tpl("v2") ? "v2" : "v1";
+    expect(save.status).toBe(marker === "v2" ? 200 : 409);
+    expect(send.rendered_html).toContain(marker);
+  });
+
+  it("a re-made copy carries its own render's warnings, which preview and test report (SPEC §5, §6)", async () => {
+    const noViewLink =
+      "Add {{ .Email.ViewInBrowserURL }} so readers can open the post in a browser.";
+    const postId = await makeDraft("Warned");
+    const res = await SELF.fetch(`${base}/api/posts/${postId}/schedule`, {
+      method: "POST",
+      headers: JSON_AUTH,
+      body: JSON.stringify({ fire_at: new Date(Date.now() + 10 * 60 * 1000).toISOString() }),
+    });
+    const scheduled = await readJson(res);
+    // The template every test starts on has no view-in-browser link, which the render says.
+    expect(scheduled.warnings).toEqual([noViewLink]);
+
+    const linked = tpl("v2").replace(
+      "</div>",
+      '<a href="{{ .Email.ViewInBrowserURL }}">Web</a></div>',
+    );
+    expect(
+      (await putSettings({ email_template: linked, remake: [scheduled.send.id] })).status,
+    ).toBe(200);
+    const preview = await readJson(
+      await SELF.fetch(`${base}/api/posts/${postId}/preview.json`, { headers: AUTH }),
+    );
+    expect([preview.frozen, preview.warnings]).toEqual([true, []]);
+
+    expect(
+      (await putSettings({ email_template: tpl("v3"), remake: [scheduled.send.id] })).status,
+    ).toBe(200);
+    const test = await readJson(
+      await SELF.fetch(`${base}/api/posts/${postId}/test`, {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ to: "warned@example.com" }),
+      }),
+    );
+    expect([test.frozen, test.warnings]).toEqual([true, [noViewLink]]);
+  });
+
+  it("a re-made send fires with the re-made copy", async () => {
+    await seedConfirmed("reader@example.com");
+    const a = await schedule(await makeDraft("Post A"));
+    expect((await putSettings({ email_template: tpl("v2"), remake: [a.id] })).status).toBe(200);
+    await env.DB.prepare("UPDATE sends SET fire_at = ? WHERE id = ?")
+      .bind(Date.now() - 1000, a.id)
+      .run();
+    await sweep(env);
+    const msg = fakeOutbox().find((m) => m.to === "reader@example.com");
+    expect(msg).toBeTruthy();
+    expect(msg!.html).toContain("v2");
+    expect(msg!.html).not.toContain("v1");
+    expect(msg!.html).toContain("/unsubscribe?token=uns-reader@example.com");
+  });
+
+  it("GET /api/settings reports in_use: the scheduled sends only, soonest first, retry_after when one is inside the lead, and the identity fields the template renders", async () => {
+    await seedConfirmed("reader@example.com");
+    const later = await schedule(await makeDraft("Later"), 60 * 60 * 1000);
+    const sooner = await schedule(await makeDraft("Sooner"), 20 * 60 * 1000);
+    const sent = await schedule(await makeDraft("Sent"));
+    await env.DB.prepare("UPDATE sends SET fire_at = ? WHERE id = ?")
+      .bind(Date.now() - 1000, sent.id)
+      .run();
+    await sweep(env);
+    const canceled = await schedule(await makeDraft("Canceled"));
+    await cancel(canceled.id);
+
+    let inUse = (await getSettings()).in_use;
+    expect(inUse.sends.map((s: any) => s.id)).toEqual([sooner.id, later.id]);
+    expect(inUse.retry_after).toBeNull();
+    expect(inUse.identity_fields).toEqual(["name"]);
+
+    const now = await sendNow(await makeDraft("Now"));
+    inUse = (await getSettings()).in_use;
+    expect(inUse.sends.map((s: any) => s.id)).toEqual([now.id, sooner.id, later.id]);
+    expect(inUse.retry_after).toBe(now.fire_at);
+  });
+
+  it("the built-in template renders the logo, name, tagline, and address", async () => {
+    await env.DB.prepare("DELETE FROM settings").run();
+    expect((await getSettings()).in_use.identity_fields).toEqual([
+      "name",
+      "tagline",
+      "logo_url",
+      "address",
+    ]);
+  });
+
+  it("refuses a malformed acknowledgement (400) before anything else", async () => {
+    await schedule(await makeDraft("Post A"));
+    const res = await putSettings({ email_template: tpl("v2"), remake: "yes" });
+    expect(res.status).toBe(400);
+  });
+
+  it("the settings-version guard refuses no acknowledged save by itself: two acknowledged saves in a row both land", async () => {
+    const a = await schedule(await makeDraft("Post A"));
+    expect((await putSettings({ email_template: tpl("v2"), remake: [a.id] })).status).toBe(200);
+    expect((await putSettings({ email_template: tpl("v3"), remake: [a.id] })).status).toBe(200);
+    expect((await getSend(a.id)).rendered_html).toContain("v3");
+  });
+
+  it("the lead that refuses a re-make is the deployment's own (SPEC §6)", async () => {
+    // Three minutes out: inside the default five-minute lead, outside a one-minute one. The
+    // suite runs on the default, so the send is moved there directly.
+    const a = await schedule(await makeDraft("Post A"));
+    await env.DB.prepare("UPDATE sends SET fire_at = ? WHERE id = ?")
+      .bind(Date.now() + 3 * 60 * 1000, a.id)
+      .run();
+    const save = async (vars: Record<string, string>) => {
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(
+        new Request(`${base}/api/settings`, {
+          method: "PUT",
+          headers: JSON_AUTH,
+          body: JSON.stringify({ email_template: tpl("v2"), remake: [a.id] }),
+        }) as Request<unknown, IncomingRequestCfProperties>,
+        { ...env, ...vars } as unknown as AppEnv,
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      return res;
+    };
+    const refused = await save({});
+    expect(refused.status).toBe(409);
+    expect((await readJson(refused)).error).toBe("remake_too_close");
+    const landed = await save({ MIN_LEAD_SECONDS: "60" });
+    expect(landed.status).toBe(200);
+    expect((await readJson(landed)).remade.map((s: any) => s.id)).toEqual([a.id]);
+    expect((await getSend(a.id)).rendered_html).toContain("v2");
+  });
+});

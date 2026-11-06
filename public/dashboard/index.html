@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lettre Newsletter Platform</title>
+<link rel="icon" href="/favicon.svg">
+<link rel="stylesheet" href="./styles.css">
+<script>
+// Sidebar mode guard — set the width-based data-nav on <html> before first paint so the
+// sidebar renders in its final width with no flash. The collapse toggle's override is
+// session-only (in-memory in client/shell.ts), so a fresh load always starts from this
+// default; keep this width formula in sync with computeNavMode() there.
+(() => {
+  try {
+    const saved = localStorage.getItem("lettre-theme");
+    document.documentElement.dataset.theme = saved === "light" || saved === "dark"
+      ? saved : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  } catch { document.documentElement.dataset.theme = "light"; }
+  const w = window.innerWidth;
+  const mode = w < 540 || w > 1024 ? "full" : "rail";
+  document.documentElement.dataset.nav = mode;
+})();
+</script>
+</head>
+<!-- The body starts signed out, with the publication's chrome hidden, until the boot probe
+     (/api/whoami) answers: a session reveals it, and a wall keeps it hidden, so a locked
+     editor never flashes the sidebar first. -->
+<body class="signed-out">
+<!-- Sidebar icon sprite. The primary nav shows icon + label at full width; in the
+     collapsed icon rail (the first step down from the full sidebar) the labels fold
+     to hover tooltips and only these marks remain. Kept out of flow and hidden from
+     assistive tech. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <symbol id="i-dash" viewBox="0 0 256 256" fill="currentColor"><path d="M104,40H56A16,16,0,0,0,40,56v48a16,16,0,0,0,16,16h48a16,16,0,0,0,16-16V56A16,16,0,0,0,104,40Zm0,64H56V56h48v48Zm96-64H152a16,16,0,0,0-16,16v48a16,16,0,0,0,16,16h48a16,16,0,0,0,16-16V56A16,16,0,0,0,200,40Zm0,64H152V56h48v48Zm-96,32H56a16,16,0,0,0-16,16v48a16,16,0,0,0,16,16h48a16,16,0,0,0,16-16V152A16,16,0,0,0,104,136Zm0,64H56V152h48v48Zm96-64H152a16,16,0,0,0-16,16v48a16,16,0,0,0,16,16h48a16,16,0,0,0,16-16V152A16,16,0,0,0,200,136Zm0,64H152V152h48v48Z"/></symbol>
+    <symbol id="i-drafts" viewBox="0 0 256 256" fill="currentColor"><path d="M213.66,82.34l-56-56A8,8,0,0,0,152,24H56A16,16,0,0,0,40,40V216a16,16,0,0,0,16,16H200a16,16,0,0,0,16-16V88A8,8,0,0,0,213.66,82.34ZM160,51.31,188.69,80H160ZM200,216H56V40h88V88a8,8,0,0,0,8,8h48V216Zm-32-80a8,8,0,0,1-8,8H96a8,8,0,0,1,0-16h64A8,8,0,0,1,168,136Zm0,32a8,8,0,0,1-8,8H96a8,8,0,0,1,0-16h64A8,8,0,0,1,168,168Z"/></symbol>
+    <symbol id="i-subs" viewBox="0 0 256 256" fill="currentColor"><path d="M117.25,157.92a60,60,0,1,0-66.5,0A95.83,95.83,0,0,0,3.53,195.63a8,8,0,1,0,13.4,8.74,80,80,0,0,1,134.14,0,8,8,0,0,0,13.4-8.74A95.83,95.83,0,0,0,117.25,157.92ZM40,108a44,44,0,1,1,44,44A44.05,44.05,0,0,1,40,108Zm210.14,98.7a8,8,0,0,1-11.07-2.33A79.83,79.83,0,0,0,172,168a8,8,0,0,1,0-16,44,44,0,1,0-16.34-84.87,8,8,0,1,1-5.94-14.85,60,60,0,0,1,55.53,105.64,95.83,95.83,0,0,1,47.22,37.71A8,8,0,0,1,250.14,206.7Z"/></symbol>
+    <symbol id="i-sent" viewBox="0 0 256 256" fill="currentColor"><path d="M227.32,28.68a16,16,0,0,0-15.66-4.08l-.15,0L19.57,82.84a16,16,0,0,0-2.49,29.8L102,154l41.3,84.87A15.86,15.86,0,0,0,157.74,248q.69,0,1.38-.06a15.88,15.88,0,0,0,14-11.51l58.2-191.94c0-.05,0-.1,0-.15A16,16,0,0,0,227.32,28.68ZM157.83,231.85l-.05.14,0-.07-40.06-82.3,48-48a8,8,0,0,0-11.31-11.31l-48,48L24.08,98.25l-.07,0,.14,0L216,40Z"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 256 256" fill="currentColor"><path d="M128,80a48,48,0,1,0,48,48A48.05,48.05,0,0,0,128,80Zm0,80a32,32,0,1,1,32-32A32,32,0,0,1,128,160Zm109.94-52.79a8,8,0,0,0-3.89-5.4l-29.83-17-.12-33.62a8,8,0,0,0-2.83-6.08,111.91,111.91,0,0,0-36.72-20.67,8,8,0,0,0-6.46.59L128,41.85,97.88,25a8,8,0,0,0-6.47-.6A112.1,112.1,0,0,0,54.73,45.15a8,8,0,0,0-2.83,6.07l-.15,33.65-29.83,17a8,8,0,0,0-3.89,5.4,106.47,106.47,0,0,0,0,41.56,8,8,0,0,0,3.89,5.4l29.83,17,.12,33.62a8,8,0,0,0,2.83,6.08,111.91,111.91,0,0,0,36.72,20.67,8,8,0,0,0,6.46-.59L128,214.15,158.12,231a7.91,7.91,0,0,0,3.9,1,8.09,8.09,0,0,0,2.57-.42,112.1,112.1,0,0,0,36.68-20.73,8,8,0,0,0,2.83-6.07l.15-33.65,29.83-17a8,8,0,0,0,3.89-5.4A106.47,106.47,0,0,0,237.94,107.21Zm-15,34.91-28.57,16.25a8,8,0,0,0-3,3c-.58,1-1.19,2.06-1.81,3.06a7.94,7.94,0,0,0-1.22,4.21l-.15,32.25a95.89,95.89,0,0,1-25.37,14.3L134,199.13a8,8,0,0,0-3.91-1h-.19c-1.21,0-2.43,0-3.64,0a8.08,8.08,0,0,0-4.1,1l-28.84,16.1A96,96,0,0,1,67.88,201l-.11-32.2a8,8,0,0,0-1.22-4.22c-.62-1-1.23-2-1.8-3.06a8.09,8.09,0,0,0-3-3.06l-28.6-16.29a90.49,90.49,0,0,1,0-28.26L61.67,97.63a8,8,0,0,0,3-3c.58-1,1.19-2.06,1.81-3.06a7.94,7.94,0,0,0,1.22-4.21l.15-32.25a95.89,95.89,0,0,1,25.37-14.3L122,56.87a8,8,0,0,0,4.1,1c1.21,0,2.43,0,3.64,0a8.08,8.08,0,0,0,4.1-1l28.84-16.1A96,96,0,0,1,188.12,55l.11,32.2a8,8,0,0,0,1.22,4.22c.62,1,1.23,2,1.8,3.06a8.09,8.09,0,0,0,3,3.06l28.6,16.29A90.49,90.49,0,0,1,222.9,142.12Z"/></symbol>
+    <symbol id="i-template" viewBox="0 0 256 256" fill="currentColor"><path d="M216,40H40A16,16,0,0,0,24,56V200a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V56A16,16,0,0,0,216,40Zm0,16V96H40V56ZM40,112H96v88H40Zm176,88H112V112H216v88Z"/></symbol>
+    <symbol id="i-view" viewBox="0 0 256 256" fill="currentColor"><path d="M224,104a8,8,0,0,1-16,0V59.32l-66.33,66.34a8,8,0,0,1-11.32-11.32L196.68,48H152a8,8,0,0,1,0-16h64a8,8,0,0,1,8,8Zm-40,24a8,8,0,0,0-8,8v72H48V80h72a8,8,0,0,0,0-16H48A16,16,0,0,0,32,80V208a16,16,0,0,0,16,16H176a16,16,0,0,0,16-16V136A8,8,0,0,0,184,128Z"/></symbol>
+    <symbol id="i-signout" viewBox="0 0 256 256" fill="currentColor"><path d="M120,216a8,8,0,0,1-8,8H48a8,8,0,0,1-8-8V40a8,8,0,0,1,8-8h64a8,8,0,0,1,0,16H56V208h56A8,8,0,0,1,120,216Zm109.66-93.66-40-40a8,8,0,0,0-11.32,11.32L204.69,120H112a8,8,0,0,0,0,16h92.69l-26.35,26.34a8,8,0,0,0,11.32,11.32l40-40A8,8,0,0,0,229.66,122.34Z"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 256 256" fill="currentColor"><path d="M165.66,202.34a8,8,0,0,1-11.32,11.32l-80-80a8,8,0,0,1,0-11.32l80-80a8,8,0,0,1,11.32,11.32L91.31,128Z"/></symbol>
+  </defs>
+</svg>
+<!-- Mobile only: a hamburger that slides the publication sidebar in as a drawer
+     (no bottom tabs). Hidden on desktop and inside the editor / reference room. -->
+<button type="button" class="nav-toggle" id="navToggle" aria-label="Open menu" aria-expanded="false">
+  <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M224,128a8,8,0,0,1-8,8H40a8,8,0,0,1,0-16H216A8,8,0,0,1,224,128ZM40,72H216a8,8,0,0,0,0-16H40a8,8,0,0,0,0,16ZM216,184H40a8,8,0,0,0,0,16H216a8,8,0,0,0,0-16Z"/></svg>
+</button>
+<div class="nav-scrim" id="navScrim" hidden></div>
+<!-- Publication workspace: a left sidebar (brand → Dashboard, primary nav, account,
+     tool footer) beside the routed view. The editor route hides the sidebar for a
+     full-width writing canvas (body.editor-mode); the reference room (Docs/API) hides
+     it too and renders its own top bar (body.tool-mode). Admin→public
+     links are fine (View publication ↗); the reverse is never emitted (SPEC §10). -->
+<div class="layout">
+  <aside class="sidebar" aria-label="Publication">
+    <!-- The column stretches to the full page height (its background + divider run all
+         the way down); this inner wrapper is the sticky, viewport-tall part that pins
+         the nav as you scroll, so the column never ends short of the viewport. -->
+    <div class="sidebar-inner">
+    <div class="sidebar-top">
+      <a class="brand" href="#/dashboard" id="brandLink" aria-label="Dashboard: publication home">
+        <span class="brand-logo" id="brandLogo" aria-hidden="true"></span>
+        <span class="brand-meta">
+          <span class="brand-name" id="brandName">Lettre</span>
+          <span class="brand-tagline" id="brandTagline" hidden></span>
+        </span>
+      </a>
+      <a class="view-pub" id="viewPub" href="/" target="_blank" rel="noopener" title="View publication">
+        <svg class="view-pub-icon" aria-hidden="true"><use href="#i-view"/></svg>
+        <span class="view-pub-label">View publication&nbsp;↗</span>
+      </a>
+      <nav class="nav-primary" aria-label="Primary">
+        <a href="#/dashboard" data-view="dashboard"><svg class="nav-icon" aria-hidden="true"><use href="#i-dash"/></svg><span class="nav-label">Dashboard</span></a>
+        <a href="#/drafts" data-view="drafts"><svg class="nav-icon" aria-hidden="true"><use href="#i-drafts"/></svg><span class="nav-label">Drafts</span></a>
+        <a href="#/sent" data-view="sent"><svg class="nav-icon" aria-hidden="true"><use href="#i-sent"/></svg><span class="nav-label">Sent</span></a>
+        <a href="#/subscribers" data-view="subscribers"><svg class="nav-icon" aria-hidden="true"><use href="#i-subs"/></svg><span class="nav-label">Subscribers</span></a>
+        <a href="#/template" data-view="template"><svg class="nav-icon" aria-hidden="true"><use href="#i-template"/></svg><span class="nav-label">Template</span></a>
+        <a href="#/settings" data-view="settings"><svg class="nav-icon" aria-hidden="true"><use href="#i-settings"/></svg><span class="nav-label">Settings</span></a>
+      </nav>
+    </div>
+    <div class="sidebar-foot">
+      <button type="button" id="themeToggle" class="theme-toggle" aria-label="Switch color theme"><span class="theme-toggle-icon" aria-hidden="true"></span><span class="theme-toggle-label">Theme</span></button>
+      <div id="identity" class="identity" role="status" aria-label="Signed-in identity"></div>
+      <!-- The Lettre mark is the single entry to the app's own room — the docs index, the
+           guide, and the API reference live there, not in this publisher-facing footer.
+           Next to it, only the collapse chevron. -->
+      <div class="tool-foot">
+        <a class="powered" href="#/docs" title="Lettre by LetRetro: docs, API reference, and version">
+          <span class="lettre-mark" aria-hidden="true"></span>
+          <span class="powered-label">Lettre <span class="powered-by">by LetRetro</span></span>
+        </a>
+        <!-- Collapse ↔ expand, tucked into the end of the footer row (chevron
+             right-aligned). Flips <html data-nav> for this load only; hidden on
+             mobile, where the sidebar is an off-canvas overlay. -->
+        <button type="button" class="nav-collapse" id="navCollapse" aria-label="Collapse sidebar" aria-expanded="true">
+          <svg class="nav-collapse-icon" aria-hidden="true"><use href="#i-chevron"/></svg>
+        </button>
+      </div>
+    </div>
+    </div>
+  </aside>
+  <main id="app" class="content"></main>
+</div>
+<!-- Shared unsaved-changes bar: one full-width banner fixed to the bottom of the
+     viewport, offset past the sidebar on desktop and edge-to-edge once the sidebar
+     is the off-canvas drawer. Every surface with an explicit save + a revertible
+     baseline (Settings, the Template page) drives it through the savebar controller
+     in client/main.ts; route() detaches it on each navigation. The post editor keeps its own
+     autosave + conflict model and deliberately does not use this. -->
+<section class="savebar" id="savebar" aria-label="Unsaved changes" aria-live="polite" hidden>
+  <div class="savebar-inner">
+    <span class="savebar-msg"></span>
+    <span class="savebar-acts">
+      <button type="button" id="savebarDiscard">Discard</button>
+      <button type="button" class="primary" id="savebarSave">Save changes</button>
+    </span>
+  </div>
+</section>
+<div id="toasts" role="status" aria-live="polite"></div>
+
+<script src="./app.js"></script>
+</body>
+</html>

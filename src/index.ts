@@ -1,0 +1,127 @@
+/**
+ * Lettre — Worker entry point.
+ *
+ * One Worker exposes both handlers (spec §6, §11):
+ *   - fetch()     → HTTP API + public reader pages + archive + webhooks,
+ *                   dispatched by the URLPattern router (see app.ts / router.ts)
+ *   - scheduled() → the reconciling send sweep, once a minute (see send/sweep.ts); in
+ *                   local dev, also the simulated receipts on the dev ticker's own clock
+ *
+ * Both refuse to run on a refused configuration or on a database behind this release's
+ * migrations (SPEC §9; see schema.ts), answering every request before any route is matched.
+ */
+
+import { createRouter, isReaderPath } from "./app";
+import type { AppEnv, Config } from "./env";
+import { ConfigError, getConfig } from "./env";
+import { json } from "./lib/errors";
+import { errorText, log, newRun, withRun } from "./lib/log";
+import { unavailablePage } from "./lib/page";
+import { drainSimulatedWebhooks, RECEIPTS_CRON } from "./providers/simulate";
+import type { Router } from "./router";
+import { schemaGap } from "./schema";
+import { sweep } from "./send/sweep";
+
+// The archive route is config-driven (ARCHIVE_BASE_PATH), whether the dev routes exist
+// follows devMode, and the reference states the minimum lead, but bindings are only
+// available per-request, so build the router lazily and cache it per (base path, dev mode,
+// lead).
+const routers = new Map<string, Router>();
+function routerFor(env: AppEnv): Router {
+  const config = getConfig(env);
+  const key = `${config.archiveBasePath}|${config.devMode}|${config.minLeadMs}`;
+  let router = routers.get(key);
+  if (!router) {
+    router = createRouter(config);
+    routers.set(key, router);
+  }
+  return router;
+}
+
+// The last deploy-config error logged, so a broken deployment logs its cause once per
+// isolate rather than on every request and every sweep tick.
+let reportedConfigError: string | undefined;
+
+/** Log a deploy-config error the first time it is seen. */
+function reportConfigError(err: ConfigError): void {
+  if (reportedConfigError !== err.message) {
+    reportedConfigError = err.message;
+    log.error("config.invalid", { variable: err.variable, message: err.message });
+  }
+}
+
+export default {
+  fetch(request, env, ctx): Promise<Response> {
+    // Every line a request logs, including work it leaves to `waitUntil`, carries its ray.
+    return withRun(request.headers.get("cf-ray") ?? newRun(), () =>
+      handleFetch(request, env as AppEnv, ctx),
+    );
+  },
+
+  async scheduled(controller, env, ctx): Promise<void> {
+    const appEnv = env as AppEnv;
+    let config: Config;
+    try {
+      config = getConfig(appEnv);
+    } catch (err) {
+      if (err instanceof ConfigError) {
+        reportConfigError(err); // the sweep would only fail the same way, every minute
+        return;
+      }
+      throw err;
+    }
+    // A database behind the release would fail the sweep's own queries every minute; the gap
+    // is logged once, and the sweep resumes on the tick after the migrations are applied.
+    if (await schemaGap(appEnv.DB, config.devMode)) {
+      return;
+    }
+    if (controller.cron === RECEIPTS_CRON) {
+      // The dev ticker's receipts tick: settle the simulated receipts that have come due and
+      // nothing else, never the sweep. A no-op wherever the simulation is off.
+      ctx.waitUntil(
+        withRun(newRun(), () =>
+          drainSimulatedWebhooks(appEnv, config).catch((err: unknown) => {
+            log.error("sim.receipts_error", { error: errorText(err) });
+          }),
+        ),
+      );
+      return;
+    }
+    ctx.waitUntil(withRun(newRun(), () => sweep(appEnv)));
+  },
+} satisfies ExportedHandler<Env>;
+
+async function handleFetch(
+  request: Request,
+  appEnv: AppEnv,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  let router: Router;
+  try {
+    router = routerFor(appEnv);
+  } catch (err) {
+    if (!(err instanceof ConfigError)) {
+      throw err;
+    }
+    // Refuse every request rather than run on config that would do the wrong thing quietly
+    // (SPEC §9). The API names the variable to fix, for the editor and Claude; a reader is
+    // told only that the page is unavailable, never a deploy setting.
+    reportConfigError(err);
+    if (isReaderPath(new URL(request.url).pathname)) {
+      return unavailablePage();
+    }
+    return json({ error: "invalid_config", message: err.message, variable: err.variable }, 500);
+  }
+  // The same two answers for a database behind the release (SPEC §9): the machine-facing
+  // paths name the migrations and the command that applies them, and a reader is told only
+  // that the page is unavailable.
+  const url = new URL(request.url);
+  const gap = await schemaGap(appEnv.DB, getConfig(appEnv).devMode);
+  if (gap) {
+    if (isReaderPath(url.pathname)) {
+      return unavailablePage();
+    }
+    return json({ error: "schema_behind", ...gap }, 500);
+  }
+  return router.handle(request, appEnv, ctx);
+}

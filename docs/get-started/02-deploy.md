@@ -1,0 +1,218 @@
+# Deploy the app
+
+Lettre runs as one Cloudflare Worker, with a D1 database for posts and subscribers and an R2 bucket for images.
+
+In this guide, you choose your hostnames, create your instance's repository, create the database and the bucket, and point Lettre's production settings at them and at your hostname. Then you deploy, and check that the app answers on your hostname.
+
+## Before you begin
+
+- A [Cloudflare account](https://dash.cloudflare.com/sign-up), with your domain's DNS on Cloudflare. Your app's hostname and its login both live there.
+- [Node.js](https://nodejs.org/) 22 or later, and [Git](https://git-scm.com/).
+- A GitHub account, or another Git host, for your instance's repository.
+- An AWS account for the newsletter, before [Connect Amazon SES](05-ses.md). [Create an AWS account](04-aws-account.md) walks through it. You can start it now. Signing up needs an email address that receives mail, and AWS can take a while to activate a new account.
+
+## Choose your hostnames
+
+Lettre uses two hostnames: one for the app, and one your email is sent from.
+
+| Hostname | What it's for |
+| --- | --- |
+| `newsletter.example.com` | the editor, the API, and the public pages readers see |
+| `send.example.com` | the address your email comes from, and its SPF, DKIM, and DMARC records |
+
+These guides put the app on a subdomain, which leaves any website you already have on `example.com` untouched. If `example.com` has no website of its own, the app can live there instead. Use `example.com` wherever these guides say `newsletter.example.com`.
+
+It's recommended to send from a subdomain rather than from `example.com` itself. Your apex domain carries the reputation of your regular email, and a newsletter shouldn't put that at risk. These guides assume a sending subdomain throughout. Avoid `mail.` as the sending name too, since mail servers read it as an inbound host. [Sending-domain DNS](../reference/02-sending-domain-dns.md#choose-your-sending-name) explains both.
+
+Throughout these guides, replace the example names with your own, and any value written as `REPLACE_WITH_…`.
+
+## 1. Create your instance's repository
+
+Your instance's repository holds its configuration, its database migrations, and the release of Lettre it runs. Lettre itself installs from npm as `@letretro/lettre`, so the repository stays small, and an upgrade changes the version it names.
+
+1. On GitHub, [create a new repository](https://github.com/new) named after your publication. These guides use `newsletter`. It can be private. Leave it empty, with no README, license, or `.gitignore`.
+
+1. Clone it, and write a new instance into it. Replace `YOUR_USERNAME` with your GitHub username, and `newsletter` with your repository's name:
+
+    ```bash
+    git clone https://github.com/YOUR_USERNAME/newsletter.git
+    cd newsletter
+    bunx lettre init
+    ```
+
+    This writes the instance's files: `wrangler.jsonc` for its settings, `package.json` with the release it runs, the release's database migrations, and a starting point for Claude Code in `.claude/`. The instance's `README.md` lists its commands.
+
+1. Install the release and its tools:
+
+    ```bash
+    bun install
+    ```
+
+1. **(Optional)** Try Lettre locally before you deploy it. Copy the local settings, and start the app:
+
+    ```bash
+    cp .dev.vars.example .dev.vars
+    bun run dev
+    ```
+
+    Open http://localhost:8787/dashboard/, and run `bun run seed` in a second terminal to load a demo publication. Email goes to a stand-in, so nothing reaches a real inbox. Press Ctrl+C to stop the server when you're done. `init` prints these steps too, in this order.
+
+1. Commit the new instance, and push it. Your local settings and data stay out of the commit, since the instance's `.gitignore` lists them:
+
+    ```bash
+    git add -A
+    git commit -m "Initialize Lettre instance"
+    git push -u origin HEAD
+    ```
+
+## 2. Sign in to Cloudflare
+
+Every command from here on acts on your Cloudflare account through the Wrangler CLI.
+
+1. Sign in. A browser window opens for you to approve the login:
+
+    ```bash
+    bunx wrangler login
+    ```
+
+1. Confirm which account you're signed in to:
+
+    ```bash
+    bunx wrangler whoami
+    ```
+
+    It prints your email and the account name. If you belong to more than one account, make sure it's the one that holds your domain.
+
+## 3. Create the database and the image bucket
+
+Each command creates the resource and writes it into the `production` block of `wrangler.jsonc`, under the binding the app already uses. Name `--env production` on each one, or Wrangler writes to the top level, which is local development.
+
+The commands below use `newsletter`. Use your instance's names instead: `lettre init` printed them, and they're in the `production` block of `wrangler.jsonc`.
+
+1. Create the database:
+
+    ```bash
+    bunx wrangler d1 create newsletter-production --env production --binding DB --update-config
+    ```
+
+1. Create the bucket for images:
+
+    ```bash
+    bunx wrangler r2 bucket create newsletter-media-production --env production --binding MEDIA --update-config
+    ```
+
+Each prints a snippet to add to your configuration. There's nothing to paste: `--update-config` has filled in the database's id, and the `MEDIA` binding already names the bucket. Wrangler also rewrites `wrangler.jsonc` in its own layout, with tabs and one value per line, and your settings stay.
+
+## 4. Configure production
+
+`wrangler.jsonc` holds two sets of settings. The top level is for local development, so leave it alone. The `production` block under `env` is yours to fill in.
+
+1. Open `wrangler.jsonc` and change the values marked here in the `production` block. Only the settings you change are shown; leave the others as they are:
+
+    ```jsonc
+    "production": {
+      "routes": [
+        {
+          "pattern": "newsletter.example.com", // ← your app's hostname
+          "custom_domain": true
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "newsletter-production", // named by init; leave it
+          "database_id": "…", // already filled in by section 3; leave it
+          "migrations_dir": "migrations"
+        }
+      ],
+      "vars": {
+        "PROVIDER": "",                                            // ← stays empty until Connect Amazon SES
+        "APP_ORIGIN": "https://newsletter.example.com",            // ← your app's hostname
+        "ARCHIVE_BASE_PATH": "/archive",
+        "SENDING_DOMAIN": "send.example.com",                      // ← your sending hostname
+        "FROM_ADDRESS": "Newsletter <newsletter@send.example.com>" // ← who your mail is from
+      }
+    }
+    ```
+
+    What each one does:
+
+    - `routes` puts the app on your hostname when you deploy. Cloudflare creates the DNS record and the certificate. Your domain must be in the same Cloudflare account, and the hostname can't already have a CNAME record; delete one if it does. The block also turns off the `workers.dev` addresses, so the app answers only on your hostname.
+    - `PROVIDER` stays empty until [Connect Amazon SES](05-ses.md) sets it. Until then the app runs without an email provider: posts can be written and previewed, but scheduling, test emails, and signups are refused. Never set it to `fake`, the top level's value, even when a wrangler warning suggests copying it: `fake` delivers nothing, and the app refuses it on your hostname.
+    - `ARCHIVE_BASE_PATH` is permanent once the first post goes out. Every post sent carries its `/archive/…` link, and changing the prefix later breaks the links already mailed. Keep `/archive` unless you have a reason not to.
+    - `FROM_ADDRESS` is the address every email comes from. Keep it on your sending hostname, and set `SENDING_DOMAIN` to the part after the `@`. The name before the `<` is what readers see as the sender. It also names the publication on its public pages, until the publisher sets a name under **Settings → Publication identity**. You can change the name at any time, and deploy again.
+
+    Change every `example.com` value, the route included. The app refuses to run while any of its settings still names `example.com`.
+
+    Every other setting has a working default. [Configuration](../reference/01-configuration.md) lists them all, and what the app refuses.
+
+1. Check the file. It fails if the configuration doesn't parse:
+
+    ```bash
+    bun run typecheck
+    ```
+
+1. Commit your settings and push them to your repository:
+
+    ```bash
+    git commit -am "Configure production"
+    git push
+    ```
+
+## 5. Apply the schema
+
+Create Lettre's tables in the production database:
+
+```bash
+bunx wrangler d1 migrations apply DB --remote --env production
+```
+
+It lists the migrations it's about to apply and asks you to confirm. It applies only the ones the database hasn't seen, so running it again is harmless.
+
+## 6. Deploy
+
+```bash
+bunx wrangler deploy --env production
+```
+
+This deploys the release your instance runs, with your settings. The output ends with the hostname the app now answers on. Deploying also registers the once-a-minute schedule that sends posts, which you can see under the Worker's **Triggers** tab in the Cloudflare dashboard.
+
+Always name `--env production`, here and on every wrangler command that stores a secret. Without it, wrangler deploys the top level, local development, as a second Worker that answers nowhere and never sends. It takes the top level's `name` in `wrangler.jsonc`, such as `newsletter-dev`. If that happens, remove it by that name:
+
+```bash
+bunx wrangler delete --name newsletter-dev
+```
+
+## Check it
+
+1. The app answers on your hostname:
+
+    ```bash
+    curl https://newsletter.example.com/health
+    ```
+
+    ```
+    {"status":"ok","service":"lettre"}
+    ```
+
+    If `curl` reports a certificate error or can't resolve the host, Cloudflare is still setting up the hostname. Or your computer remembers it from before it existed. Try again over the next 30 minutes.
+
+1. The editor is locked. Until you set up Access in the next step, the app can't tell who is asking, so it lets no one in:
+
+    ```bash
+    curl -s -o /dev/null -w "%{http_code}\n" https://newsletter.example.com/api/whoami
+    ```
+
+    ```
+    401
+    ```
+
+    In a browser, `https://newsletter.example.com/dashboard/` says the editor is locked until you set up Access. That's expected.
+
+1. In a browser, `https://newsletter.example.com/` shows the newsletter's public home page. Its subscribe page, `/subscribe`, says signups aren't open yet, until Connect Amazon SES has sent its first test email.
+
+If the public pages instead say the newsletter is temporarily unavailable, and `/health` answers `500` with a body like `{"error":"invalid_config","variable":"APP_ORIGIN",…}`, the setting it names is missing, malformed, or still on `example.com`. Fix it in `wrangler.jsonc`, commit, and deploy again.
+
+If the public pages say the same, but `/health` answers `500` with `{"error":"schema_behind","missing":[…],…}`, the database hasn't run the migrations it lists, most often because step 5 was skipped or its prompt answered no. Run step 5's command, which the body's `message` repeats; the app answers as soon as it finishes, with no new deploy.
+
+Next, [lock the dashboard with Access](03-access.md).

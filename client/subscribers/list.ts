@@ -1,0 +1,318 @@
+// The subscribers list: the by-status composition and the filterable roster.
+
+import {
+  FLAG_MEANING,
+  STATUS_MEANING,
+  SUBSCRIBER_ACTIONS,
+  SUPPRESSED_MEANING,
+  type SuppressionFlag,
+} from "../../shared/subscriber_meanings";
+import type {
+  Subscriber,
+  SubscriberCounts,
+  SubscriberListResponse,
+  SubscriberStatus,
+} from "../../shared/subscribers";
+import { api, describeError } from "../api";
+import { setTitle } from "../lifecycle";
+import {
+  inSandbox,
+  PRODUCTION_ACCESS_HREF,
+  readProviderStatus,
+  refusalOf,
+  signupsPausedHtml,
+} from "../provider_status";
+import { appState } from "../state";
+import { $, $$ } from "../ui/dom";
+import { saveFile } from "../ui/download";
+import { fmt } from "../ui/format";
+import { type Html, html, setHtml } from "../ui/html";
+import {
+  type ListState,
+  listQuery,
+  listToolbar,
+  renderPager,
+  th,
+  wireSort,
+  wireToolbar,
+} from "../ui/list_controls";
+import { badge, busy, type MenuItem, openMenu, renderError, toast } from "../ui/widgets";
+import { subscriberActs } from "./acts";
+import { addSubscriberModal } from "./dialogs";
+import { exportFile } from "./export";
+import { breakableEmail, statusBadge, subscriberHref, suppressionFlag } from "./labels";
+
+// The story of the list as a whole: its composition (by-status counts) and the roster,
+// filterable, sortable, and searchable. Consent status and suppression are separate
+// axes: the status filter narrows the roster; the suppression facet is an overlay. The
+// dashboard tiles deep-link via #/subscribers/<filter> — `initialFilter` seeds the
+// status filter, or the suppression facet for "suppressed".
+const SUB_STATUSES: { value: SubscriberStatus; label: string }[] = [
+  { value: "confirmed", label: "Confirmed" },
+  { value: "pending", label: "Pending" },
+  { value: "unsubscribed", label: "Unsubscribed" },
+];
+
+/** The slices of the list a route can open on (`#/subscribers/confirmed`), the dashboard's
+ *  tiles linking each; any other segment there names a subscriber. */
+export const LIST_FILTERS: readonly string[] = [
+  "confirmed",
+  "pending",
+  "unsubscribed",
+  "suppressed",
+];
+
+export async function renderSubscribers(
+  initialFilter: string | undefined,
+  root: HTMLElement,
+  signal: AbortSignal,
+): Promise<void> {
+  setTitle(signal, "Subscribers");
+  const state: ListState = {
+    status: "",
+    search: "",
+    suppressed: "",
+    sort: "created_at",
+    dir: "desc",
+    offset: 0,
+    limit: 50,
+  };
+  if (initialFilter === "suppressed") {
+    state.suppressed = "only";
+  } else if (initialFilter && LIST_FILTERS.includes(initialFilter)) {
+    state.status = initialFilter;
+  }
+
+  setHtml(
+    root,
+    html`
+    <div class="spread page-head"><h1>Subscribers</h1><span class="row"><button type="button" class="ghost" id="importSubs">Import</button><button type="button" class="ghost" id="exportSubs">Export</button><button class="primary" id="addSub">Add subscriber</button></span></div>
+    <div class="health red" id="subSignupsPaused" role="status" hidden></div>
+    <div class="card sub-summary"><div class="sub-summary-head"><div id="subCounts" class="row muted" role="group" aria-label="Show">Loading…</div><button type="button" class="sub-legend-toggle" id="subLegendToggle" aria-expanded="false" aria-controls="subLegend">Legend</button></div><p class="workers-plan" id="subWorkersPlan" role="status" hidden></p>${legend()}</div>
+    ${listToolbar({ statuses: SUB_STATUSES, suppressible: true, searchPlaceholder: "Search email…" })}
+    <div id="subList" class="muted">Loading…</div>
+    <div id="subPager"></div>`,
+  );
+
+  const listEl = $("#subList");
+  const pagerEl = $("#subPager");
+  // Read once for the empty list's advice: in the sandbox a shared subscribe page can't
+  // confirm anyone. It never fails (a failed read is no state), so it holds no list back.
+  const provider = readProviderStatus(appState.appConfig?.deployment, signal);
+
+  async function load() {
+    try {
+      const [data, prov] = await Promise.all([
+        api<SubscriberListResponse>(`/api/subscribers?${listQuery(state)}`, { signal }),
+        provider,
+      ]);
+      const c = data.counts;
+      // The counts stay a global by-status summary (independent of the active filter);
+      // the page total below reflects the filtered roster. Each count is also the way to
+      // its slice of the list (wireCountFilters, below). Only the counts repaint, so the
+      // legend stays open or closed across a reload.
+      paintCounts($("#subCounts"), c, state);
+      // On Workers Free's limits, a list past what Free suits: the server's advice, as it stands.
+      const plan = $("#subWorkersPlan");
+      plan.hidden = !data.workers_plan_advice;
+      plan.textContent = data.workers_plan_advice ?? "";
+      // Suppressions alone are no subscribers, so a list of only them still points the way in.
+      const listEmpty = c.pending + c.confirmed + c.unsubscribed === 0;
+      renderSubTable(listEl, data.subscribers, state, load, signal, listEmpty, inSandbox(prov));
+      // While email isn't going out, signups are paused (SPEC §7, §13): said where the list is,
+      // with the fix on the dashboard.
+      const paused = $("#subSignupsPaused");
+      paused.hidden = !refusalOf(prov);
+      setHtml(
+        paused,
+        refusalOf(prov)
+          ? html`<span class="health-dot">⚠️</span><div>${signupsPausedHtml()}</div>`
+          : html``,
+      );
+      renderPager(pagerEl, state, data.page, load);
+    } catch (e) {
+      renderError(listEl, describeError(e), load);
+    }
+  }
+
+  wireCountFilters(root, state, load);
+  const legendToggle = $("#subLegendToggle");
+  legendToggle.onclick = () => {
+    const open = legendToggle.getAttribute("aria-expanded") !== "true";
+    legendToggle.setAttribute("aria-expanded", String(open));
+    $("#subLegend").hidden = !open;
+  };
+  $("#addSub").onclick = () => addSubscriberModal(load, signal);
+  $("#importSubs").onclick = () => {
+    location.hash = "#/subscribers/import";
+  };
+  const exportBtn = $<HTMLButtonElement>("#exportSubs");
+  exportBtn.onclick = () =>
+    busy(exportBtn, "Exporting…", async () => {
+      try {
+        const file = await exportFile();
+        saveFile(file.text, file.name, "text/csv");
+      } catch (e) {
+        // The export has no surface of its own to say a failure in (DESIGN §5).
+        toast(describeError(e));
+      }
+    });
+  wireToolbar(root, state, load);
+  load();
+}
+
+// The summary's counts double as filters, as the dashboard's tiles do: a count shows its
+// slice of the list, and choosing it again shows the whole list. A status count shows that
+// status, suppressed or not, and the suppressed count every suppressed subscriber, whatever
+// their status, so each count is exactly the rows it shows (the server counts the same
+// way). The toolbar's controls follow, and a count reads as chosen while the filter is its.
+// A count chosen from the keyboard keeps its focus: the buttons are made once and then
+// only relabelled, so a reload never replaces the button the reader is on.
+type CountFilter = SubscriberStatus | "suppressed";
+const COUNT_FILTERS: CountFilter[] = ["confirmed", "pending", "unsubscribed", "suppressed"];
+function countSelected(state: ListState, f: CountFilter): boolean {
+  if (state.search) {
+    return false;
+  }
+  return f === "suppressed"
+    ? state.suppressed === "only" && !state.status
+    : state.status === f && !state.suppressed;
+}
+function paintCounts(el: HTMLElement, c: SubscriberCounts, state: ListState): void {
+  if (!el.querySelector("[data-filter]")) {
+    setHtml(
+      el,
+      html`${COUNT_FILTERS.map((f) => html`<button type="button" class="sub-count" data-filter="${f}" aria-pressed="false"></button>`)}`,
+    );
+  }
+  for (const b of $$<HTMLElement>("[data-filter]", el)) {
+    const f = b.dataset.filter as CountFilter;
+    setHtml(b, html`${f === "confirmed" ? html`<strong>${c[f]}</strong>` : c[f]} ${f}`);
+    b.setAttribute("aria-pressed", String(countSelected(state, f)));
+  }
+}
+function wireCountFilters(root: HTMLElement, state: ListState, reload: () => void): void {
+  const counts = $("#subCounts", root);
+  counts.onclick = (e) => {
+    const b = e.target instanceof Element ? e.target.closest<HTMLElement>("[data-filter]") : null;
+    if (!b) {
+      return;
+    }
+    const f = b.dataset.filter as CountFilter;
+    const choose = !countSelected(state, f);
+    // A count shows exactly its slice, so choosing one drops a search too.
+    state.status = choose && f !== "suppressed" ? f : "";
+    state.suppressed = choose && f === "suppressed" ? "only" : "";
+    state.search = "";
+    state.offset = 0;
+    $<HTMLInputElement>(".lt-search", root).value = "";
+    $<HTMLSelectElement>(".lt-status", root).value = state.status;
+    $<HTMLInputElement>(".lt-suppressed", root).checked = state.suppressed === "only";
+    for (const other of $$<HTMLElement>("[data-filter]", counts)) {
+      other.setAttribute(
+        "aria-pressed",
+        String(countSelected(state, other.dataset.filter as CountFilter)),
+      );
+    }
+    reload();
+  };
+}
+
+// The legend: what each label a row can show means (DESIGN §3), every pill drawn as the
+// list draws it beside its definition, so it also says what the colors mean; then the acts
+// on a subscriber and when each is the one to use, which say whose decision each records.
+// The words are shared with the API reference (shared/subscriber_meanings.ts), so a client
+// is told what the publisher is told. Its toggle sits at the right of the counts and the legend
+// opens below the whole card, a layout a <details> can't give, so the toggle is a button
+// carrying aria-expanded.
+function legendRow(term: Html, means: string): Html {
+  return html`<dt>${term}</dt><dd>${means}</dd>`;
+}
+function legend(): Html {
+  const flags = Object.keys(FLAG_MEANING) as SuppressionFlag[];
+  return html`<div class="sub-legend" id="subLegend" role="region" aria-labelledby="subLegendToggle" hidden><div class="sub-legend-body">
+    <h2>Status</h2>
+    <dl>${SUB_STATUSES.map(({ value }) =>
+      legendRow(
+        badge(value),
+        // Where to read why someone left is the editor's to say; the shared words stop at what it means.
+        value === "unsubscribed"
+          ? `${STATUS_MEANING[value]} Why they left is on their page.`
+          : STATUS_MEANING[value],
+      ),
+    )}</dl>
+    <h2>Suppressed</h2>
+    <p>${SUPPRESSED_MEANING} The red flag beside the address says why:</p>
+    <dl>${flags.map((flag) => legendRow(html`<span class="badge suppressed">${flag}</span>`, FLAG_MEANING[flag]))}</dl>
+    <h2>What you can do</h2>
+    <dl>${Object.values(SUBSCRIBER_ACTIONS).map(({ label, when }) =>
+      legendRow(html`<strong class="sub-legend-act">${label}</strong>`, when),
+    )}</dl>
+  </div></div>`;
+}
+
+function renderSubTable(
+  listEl: Element,
+  rows: Subscriber[],
+  state: ListState,
+  reload: () => void,
+  signal: AbortSignal,
+  listEmpty: boolean,
+  sandbox: boolean,
+): void {
+  if (!rows.length) {
+    // An empty list, rather than a filter that matches no one, points the way in. In the SES
+    // sandbox the confirmation email reaches only addresses verified in SES, so the subscribe
+    // page waits for production access; an import sends no email, so it's offered either way.
+    const importLink = html`<a href="#/subscribers/import">Import your list</a>`;
+    setHtml(
+      listEl,
+      !listEmpty
+        ? html`<p class="muted">No subscribers match.</p>`
+        : sandbox
+          ? html`<p class="muted">No subscribers yet. ${importLink} from another service. Once AWS grants production access, share your subscribe page. <a class="set-link" href="${PRODUCTION_ACCESS_HREF}">Request production access</a></p>`
+          : html`<p class="muted">No subscribers yet. ${importLink} from another service, or share your subscribe page.</p>`,
+    );
+    return;
+  }
+  // The joined cell is named so the stacked layout can label it. The wrapper is
+  // what the stacking measures: this table stacks by its own width, not the viewport's.
+  setHtml(
+    listEl,
+    html`<div class="table-wrap subs-wrap"><table class="list-table subs-table stacks has-actions"><colgroup><col><col class="c-status"><col class="c-date"><col class="c-act"></colgroup><thead><tr>${th("Email", "email", state)}${th("Status", null, state)}${th("Joined", "created_at", state)}<th></th></tr></thead><tbody>${rows.map(
+      (s) => {
+        return html`<tr class="clickable" data-id="${s.id}"><td><a class="sub-email" href="${subscriberHref(s.id)}">${breakableEmail(s.email)}</a>${suppressionFlag(s)}</td><td>${statusBadge(s)}</td><td class="muted joined">${fmt(s.created_at)}</td><td class="act"><button class="icon" data-menu="${s.id}" aria-label="Subscriber actions" aria-haspopup="menu">⋯</button></td></tr>`;
+      },
+    )}</tbody></table></div>`,
+  );
+  wireSort(listEl, state, reload);
+  // The whole row opens the subscriber's page, as Sent's rows open a record; the address is
+  // the link for the keyboard and a middle click, and the ⋯ menu stays outside the target.
+  for (const tr of $$<HTMLTableRowElement>("tr[data-id]", listEl)) {
+    tr.onclick = (e) => {
+      if (!(e.target instanceof Element && e.target.closest("a, button"))) {
+        location.hash = subscriberHref(tr.dataset.id ?? "");
+      }
+    };
+  }
+  for (const b of $$<HTMLButtonElement>("[data-menu]", listEl)) {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      const row = rows.find((r) => r.id === b.dataset.menu);
+      if (!row) {
+        return;
+      }
+      // Anyone can be viewed, on their own page; the acts are the ones it offers too.
+      const items: MenuItem[] = [
+        {
+          label: "View subscriber",
+          onClick: () => {
+            location.hash = subscriberHref(row.id);
+          },
+        },
+        ...subscriberActs(row, reload, signal),
+      ];
+      openMenu(b, items, signal);
+    };
+  }
+}

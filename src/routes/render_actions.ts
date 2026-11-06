@@ -1,0 +1,390 @@
+/**
+ * Preview, test-send, and the fake outbox. All authed.
+ *   GET  /api/posts/:id/preview.json   → { url, subject, warnings, frozen } (where the preview is)
+ *   GET  /api/posts/:id/preview        → the rendered HTML (generic unsubscribe link)
+ *   GET  /api/posts/:id/web            → the same copy as its archive page will show it
+ *   POST /api/posts/:id/test           → send the post's email to one address via the provider
+ *                                    (a scheduled post's frozen copy; a draft's live render)
+ *   POST /api/settings/template/test → send a SAMPLE post through the saved template
+ *   GET  /api/dev/outbox           → fake transport's outbox (fake provider only)
+ *
+ * Every path runs the one render() (I5), or serves what it froze.
+ */
+
+import { isValidEmail, normalizeEmail } from "../../shared/email";
+import type { PreviewResponse, TestSendResponse } from "../../shared/posts";
+import type { TemplateTestResponse } from "../../shared/settings";
+import * as images from "../db/images";
+import type { PostRow, RevisionRow } from "../db/posts";
+import * as posts from "../db/posts";
+import {
+  getActiveSendForPost,
+  latestSentSendForPost,
+  markTested,
+  renderWarnings,
+} from "../db/sends";
+import { getSettings } from "../db/settings";
+import { fieldError, type JsonObject, optString, readJsonObject } from "../lib/body";
+import { badRequest, json, notFound } from "../lib/errors";
+import { POST_PAGE_SECURITY_HEADERS } from "../lib/page_headers";
+import { fakeNotifications } from "../notify/fake";
+import { getProvider, requireConnectedProvider } from "../providers";
+import { fakeOutbox } from "../providers/fake";
+import {
+  type RenderedEmail,
+  type RenderInput,
+  render,
+  substituteRecipient,
+} from "../render/render";
+import { type EmailBranding, resolveBranding } from "../render/template_engine";
+import type { RequestContext } from "../router";
+import { param } from "../router";
+import { sendTest } from "../services/test_send";
+import { webVersion } from "./archive";
+import { testUnsubscribeUrl } from "./public";
+import { readerIdentity } from "./reader";
+
+async function loadRenderInput(c: RequestContext): Promise<RenderInput> {
+  const post = await posts.getPost(c.env.DB, param(c, "id"));
+  if (!post) {
+    throw notFound("post");
+  }
+  const revision = await posts.getCurrentRevision(c.env.DB, post);
+  if (!revision) {
+    throw badRequest("This post has no content yet. Write something, then try again.");
+  }
+  const imgs = await images.listImages(c.env.DB, post.id);
+  return { post, revision, images: imgs };
+}
+
+/** The branding (template + identity) the render path fills — the same the send uses. */
+async function loadBranding(c: RequestContext): Promise<EmailBranding> {
+  return resolveBranding(await getSettings(c.env.DB), c.config);
+}
+
+/** The email a post's publisher-facing instruments show or send (SPEC §5): once the
+ *  post is scheduled, the active send's frozen copy — exactly what will fire, or is
+ *  firing (a send in flight is still the frozen copy readers are receiving); once it is
+ *  sent, the record's frozen copy, the same bytes the archive page serves (I3); before
+ *  any of that, a live render of the current draft through the one render path (I5).
+ *  One reader for the preview page, the preview action, and the post test, so the
+ *  three instruments can never disagree about what went, or is going, out. */
+interface PostEmail {
+  input: RenderInput;
+  email: RenderedEmail;
+  warnings: string[];
+  /** The send whose frozen copy this is; null for a draft's live render. */
+  frozen: { id: string } | null;
+  /** When the post went out, or will: the send's start, else its fire time, or now for a
+   *  draft. The date the web version's masthead carries, as the post page dates it. */
+  dateMs: number;
+}
+
+async function loadPostEmail(c: RequestContext): Promise<PostEmail> {
+  const input = await loadRenderInput(c);
+  const send =
+    input.post.status === "scheduled"
+      ? await getActiveSendForPost(c.env.DB, input.post.id)
+      : input.post.status === "sent"
+        ? await latestSentSendForPost(c.env.DB, input.post.id)
+        : null;
+  if (send) {
+    return {
+      input,
+      email: { subject: send.subject, html: send.rendered_html, text: send.rendered_text },
+      // What the render said when it froze this copy, kept with it: the copy is what goes
+      // out, so a test of it reports what it found (SPEC §5).
+      warnings: renderWarnings(send),
+      frozen: { id: send.id },
+      dateMs: send.started_at ?? send.fire_at,
+    };
+  }
+  const result = await render(input, c.config, await loadBranding(c));
+  return { input, email: result, warnings: result.warnings, frozen: null, dateMs: Date.now() };
+}
+
+/** An authed page carrying a post's HTML: no script, no form, never framed by another
+ *  site, never indexed. */
+function postPage(html: string): Response {
+  return new Response(html, {
+    headers: {
+      ...POST_PAGE_SECURITY_HEADERS,
+      "content-type": "text/html; charset=utf-8",
+      "x-robots-tag": "noindex",
+    },
+  });
+}
+
+/**
+ * The email as the publisher's preview shows it, its page and its text alike: the recipient's
+ * fields filled as a test fills them, so its unsubscribe link opens the same page a test
+ * email's does rather than one calling the link invalid (SPEC §7).
+ */
+function asPreviewed(c: RequestContext, email: RenderedEmail): RenderedEmail {
+  return substituteRecipient(email, {
+    ".Email.UnsubscribeURL": testUnsubscribeUrl(c.config),
+    ".Email.SentTo": "",
+  });
+}
+
+export async function preview(c: RequestContext): Promise<Response> {
+  const { input, email, warnings, frozen } = await loadPostEmail(c);
+  const body: PreviewResponse = {
+    url: `${c.config.appOrigin}/api/posts/${input.post.id}/preview`,
+    subject: email.subject,
+    text: asPreviewed(c, email).text,
+    warnings,
+    frozen: frozen !== null,
+  };
+  return json(body);
+}
+
+export async function previewPage(c: RequestContext): Promise<Response> {
+  const { email } = await loadPostEmail(c);
+  return postPage(asPreviewed(c, email).html);
+}
+
+/**
+ * The post's web version: what its public post page will show, built by the post page's
+ * own code from the same copy the preview shows (a draft's live render, or the frozen copy
+ * once scheduled), so the publisher can proof the page before it is permanent (SPEC §5).
+ */
+export async function webPage(c: RequestContext): Promise<Response> {
+  const { email, dateMs } = await loadPostEmail(c);
+  return postPage(
+    webVersion(email.html, {
+      config: c.config,
+      identity: await readerIdentity(c, c.config),
+      dateMs,
+    }),
+  );
+}
+
+/**
+ * Send a post test to one address. Once the post is scheduled, the test is its
+ * FROZEN copy (SPEC §5): the send's `rendered_html`/`rendered_text`, handed to the
+ * provider exactly as the fire path hands them, with the per-recipient placeholders
+ * filled for the test address — so the test can never disagree with what will go out
+ * (or with the view-in-browser page). A draft keeps the live render: its content, the
+ * current template, and the current identity, through the one render path (I5).
+ */
+export async function test(c: RequestContext): Promise<Response> {
+  const raw = optString(await readJsonObject(c), "to") ?? "";
+  const to = normalizeEmail(raw);
+  if (!isValidEmail(to)) {
+    throw fieldError(
+      "to",
+      to
+        ? `“${raw.trim()}” isn’t a valid email address. Fix it, then send again.`
+        : "Enter the email address to send the test to.",
+    );
+  }
+  requireConnectedProvider(c.config);
+
+  // When the copy was read, so the test marks the send tested only if no re-make replaced
+  // that copy while the provider was answering.
+  const readAt = Date.now();
+  const { input, email, warnings, frozen } = await loadPostEmail(c);
+  const provider = getProvider(c.config, c.env);
+  // A test uses the same per-recipient substitution path as a real send.
+  const unsubscribeUrl = testUnsubscribeUrl(c.config);
+  const recipients = [{ email: to, unsubscribeUrl }];
+  // Each press is a deliberate new send, never a retry of the last one, so it carries a
+  // key of its own: the fake records once per key and address, and would fold a second
+  // test into the first.
+  const [res] = await sendTest(
+    c.env.DB,
+    c.config,
+    provider,
+    email,
+    recipients,
+    {
+      purpose: "test",
+      tag: `test-${input.post.id}`,
+      batchKey: `test-${input.post.id}-${crypto.randomUUID()}`,
+    },
+    { test: "post", postId: input.post.id },
+  );
+  const sent = res?.sent === true;
+
+  // A test of a scheduled send's frozen copy is the sign-off the re-make rule asks for
+  // (SPEC §6, §8): record it, which settles the send's `remade` condition.
+  if (frozen && sent) {
+    await markTested(c.env.DB, frozen.id, readAt, Date.now());
+  }
+
+  const result: TestSendResponse = {
+    sent,
+    not_sent: res && !res.sent ? res.notSent : null,
+    provider: provider.name,
+    to,
+    subject: email.subject,
+    warnings,
+    // Which copy went: a scheduled or sent post's frozen render, or the draft's live one.
+    frozen: frozen !== null,
+  };
+  return json(result);
+}
+
+// --- template test-send ----------------------------------------------------------
+
+/** How many addresses one template test may fan out to (matches the settings cap). */
+export const MAX_TEMPLATE_TEST_RECIPIENTS = 20;
+
+// A synthetic post that stands in for {{ .Post.Body }} when testing the TEMPLATE
+// itself, since there's no real post to render. It flows through the same render() as a
+// real send (I5); only the body's source differs. It says what it is because it arrives
+// under the publisher's own sign-off and would otherwise read as a post they didn't write.
+// The on-page preview can use placeholder text instead: its dashed box says that, and an
+// email can't carry the box.
+const TEMPLATE_TEST_SUBJECT = "Template test: how your posts will look";
+
+/** The sample post as it is headed outside a template test: Settings' preview of a post
+ *  page (`routes/reader_pages.ts`). */
+export const SAMPLE_POST_SUBJECT = "How your posts will look";
+
+const TEMPLATE_TEST_MARKDOWN = [
+  `# ${SAMPLE_POST_SUBJECT}`,
+  "",
+  "This is a test of your email template, with sample text. A real post’s Markdown fills this space.",
+  "",
+  "It shows the parts of a post that a template styles:",
+  "",
+  "- Headings, like the one above",
+  "- **Bold** text",
+  "- [Links](https://example.com)",
+  "- Lists, like this one",
+  "",
+  "> And quotes, like this one.",
+].join("\n");
+
+/** Build the synthetic render input for a sample post, with no post and no images. A template
+ *  test's subject says it is one; a preview passes its own. */
+export function sampleRenderInput(subject = TEMPLATE_TEST_SUBJECT): RenderInput {
+  const now = Date.now();
+  const post: PostRow = {
+    id: "sample",
+    slug: "sample-post",
+    slug_auto: false,
+    // No post has this token, so the sample's "view in browser" opens "Nothing here yet".
+    unlisted_token: "sample",
+    subject,
+    status: "draft",
+    email_only: false,
+    current_revision: "sample-rev",
+    created_at: now,
+    updated_at: now,
+  };
+  const revision: RevisionRow = {
+    id: "sample-rev",
+    post_id: "sample",
+    markdown: TEMPLATE_TEST_MARKDOWN,
+    metadata: JSON.stringify({ subject, slug: post.slug }),
+    author: null,
+    client: null,
+    created_at: now,
+  };
+  return { post, revision, images: [] };
+}
+
+/** Resolve the recipient list: the body's `to` (a string or array), or — when it's
+ *  omitted — the saved default test recipients. Normalizes, validates, and dedupes;
+ *  throws a 400 that names a bad address. */
+function resolveTestRecipients(body: JsonObject, defaults: string[]): string[] {
+  const raw = body.to;
+  let input: unknown[];
+  if (raw === undefined || raw === null) {
+    input = defaults;
+  } else if (Array.isArray(raw)) {
+    input = raw;
+  } else {
+    input = [raw];
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of input) {
+    if (typeof item !== "string") {
+      throw fieldError("to", "Each recipient must be an email address.");
+    }
+    const email = normalizeEmail(item);
+    if (!email) {
+      continue;
+    }
+    if (!isValidEmail(email)) {
+      throw fieldError("to", `“${item.trim()}” isn’t a valid email address. Fix or remove it.`);
+    }
+    if (seen.has(email)) {
+      continue;
+    }
+    seen.add(email);
+    out.push(email);
+  }
+  return out;
+}
+
+/**
+ * Send a test of the EMAIL TEMPLATE: render a sample post through the one render
+ * path with the *saved* branding (template + identity) and deliver it via the
+ * provider, so the operator sees the template in a real inbox (SPEC §5, I5). It
+ * renders what will actually ship — the stored template, never unsaved editor
+ * content — so a clean test is a real guarantee, not a lookalike.
+ */
+export async function templateTest(c: RequestContext): Promise<Response> {
+  const settings = await getSettings(c.env.DB);
+  // An empty body is fine: it falls back to the saved default recipients.
+  const body = await readJsonObject(c, { optional: true });
+  const recipients = resolveTestRecipients(body, settings.testRecipients);
+  if (recipients.length === 0) {
+    throw fieldError(
+      "to",
+      "There’s no one to send the test to. Enter an address, or set default test recipients in Settings.",
+    );
+  }
+  if (recipients.length > MAX_TEMPLATE_TEST_RECIPIENTS) {
+    throw fieldError(
+      "to",
+      `A test can go to at most ${MAX_TEMPLATE_TEST_RECIPIENTS} addresses. Remove some, then send again.`,
+    );
+  }
+  requireConnectedProvider(c.config);
+
+  const result = await render(sampleRenderInput(), c.config, resolveBranding(settings, c.config));
+  const provider = getProvider(c.config, c.env);
+  const unsubscribeUrl = testUnsubscribeUrl(c.config);
+  // A deliberate manual test is a fresh send each press (not a retry), so it carries a
+  // key of its own, as a post test does. The tag names the send too (the dev simulation
+  // keys its rolls on it), so it is as fresh as the key.
+  const testId = `template-test-${crypto.randomUUID()}`;
+  const batch = recipients.map((email) => ({ email, unsubscribeUrl }));
+  const answers = await sendTest(
+    c.env.DB,
+    c.config,
+    provider,
+    result,
+    batch,
+    { purpose: "test", tag: testId, batchKey: testId },
+    { test: "template" },
+  );
+  // The addresses the provider didn't take, with why, so the client can offer exactly
+  // those again and no one gets a second copy.
+  const notSent = answers.flatMap((a) => (a.sent ? [] : [{ email: a.email, ...a.notSent }]));
+
+  const report: TemplateTestResponse = {
+    sent: answers.length - notSent.length,
+    total: recipients.length,
+    failed: notSent.map((n) => n.email),
+    not_sent: notSent,
+    provider: provider.name,
+    recipients,
+    subject: result.subject,
+    warnings: result.warnings,
+  };
+  return json(report);
+}
+
+export async function devOutbox(c: RequestContext): Promise<Response> {
+  if (!c.config.devMode) {
+    throw notFound("only available in local development");
+  }
+  return json({ messages: fakeOutbox(), notifications: fakeNotifications() });
+}

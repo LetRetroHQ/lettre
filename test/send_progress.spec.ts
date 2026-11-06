@@ -1,0 +1,571 @@
+import { SELF } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { beforeEach, describe, expect, it } from "vitest";
+import type { SendRow } from "../src/db/sends";
+import * as sends from "../src/db/sends";
+import { MISSED_THRESHOLD_MS, STUCK_THRESHOLD_MS } from "../src/lib/time";
+import { clearFakeOutbox, failFakeSendBatch } from "../src/providers/fake";
+import { runSend } from "../src/send/loop";
+import { resolveStuckSend } from "../src/send/resolve";
+import { applyDeliveryEvents } from "../src/services/webhook_events";
+import { condition, has } from "./support/conditions";
+import { frozenSend, person, resetDatabase, seedConfirmed } from "./support/fixtures";
+import { AUTH, base } from "./support/http";
+import { viewOf } from "./support/view";
+
+// The denormalized counters on `sends` are a rebuildable cache of the `deliveries`
+// bucketing, kept so a list or the feed reads a send's progress without aggregating its
+// record, and maintained in the same transactions as each recipient transition. These tests
+// pin that they stay consistent across a full send, a resume, a webhook, and a resolve, and
+// that a send's view and its derived phase read off them.
+
+/** The counters must always equal the `deliveries` aggregate (they are its cache). */
+async function expectCountersMatchAggregate(sendId: string): Promise<SendRow> {
+  const [send, outcomes] = await Promise.all([
+    sends.getSend(env.DB, sendId),
+    sends.deliveryOutcomes(env.DB, sendId),
+  ]);
+  if (!send) {
+    throw new Error("send not found");
+  }
+  expect(send.c_delivered).toBe(outcomes.delivered);
+  expect(send.c_bounced).toBe(outcomes.bounced);
+  expect(send.c_complained).toBe(outcomes.complained);
+  expect(send.c_unsent).toBe(outcomes.unsent);
+  expect(send.c_skipped).toBe(outcomes.skipped);
+  expect(send.c_accepted).toBe(outcomes.accepted);
+  // The outcomes and the counters split pending from dispatched alike: one vocabulary.
+  expect([send.c_pending, send.c_in_flight]).toEqual([outcomes.pending, outcomes.dispatched]);
+  // Every recipient lands in exactly one bucket, summing to the materialized audience.
+  const sum =
+    send.c_pending +
+    send.c_in_flight +
+    send.c_accepted +
+    send.c_delivered +
+    send.c_bounced +
+    send.c_complained +
+    send.c_skipped +
+    send.c_unsent;
+  expect(sum).toBe(outcomes.recipients);
+  return send;
+}
+
+beforeEach(async () => {
+  await resetDatabase();
+  clearFakeOutbox();
+});
+
+describe("send counters (sends.c_*)", () => {
+  it("track the deliveries aggregate across a full send", async () => {
+    await seedConfirmed("a@example.com");
+    await seedConfirmed("b@example.com");
+    await seedConfirmed("c@example.com");
+    const send = await frozenSend(Date.now() - 1000);
+
+    await runSend(env, send.id);
+
+    const row = await expectCountersMatchAggregate(send.id);
+    expect(row.status).toBe("sent");
+    expect(row.c_accepted).toBe(3);
+    expect(row.c_pending).toBe(0);
+    expect(row.c_in_flight).toBe(0);
+  });
+
+  it("stay consistent through a mid-send crash and resume (I4)", async () => {
+    await seedConfirmed("x@example.com");
+    await seedConfirmed("y@example.com");
+    const send = await frozenSend(Date.now() - 1000);
+
+    failFakeSendBatch(1); // the first request finds the provider down
+    await runSend(env, send.id);
+    let row = await expectCountersMatchAggregate(send.id);
+    expect(row.status).toBe("sending");
+    expect(row.c_pending).toBe(2); // back in pending as fresh rows, to be handed off again
+    const keyed = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM deliveries WHERE send_id = ? AND dispatch_key IS NOT NULL",
+    )
+      .bind(send.id)
+      .first<{ n: number }>();
+    expect(keyed!.n).toBe(0);
+    expect(row.c_in_flight).toBe(0);
+
+    await runSend(env, send.id); // resume
+    row = await expectCountersMatchAggregate(send.id);
+    expect(row.status).toBe("sent");
+    expect(row.c_accepted).toBe(2);
+  });
+
+  it("move a recipient from accepted to its event bucket on a webhook (and back out)", async () => {
+    await seedConfirmed("d@example.com");
+    await seedConfirmed("e@example.com");
+    const send = await frozenSend(Date.now() - 1000);
+    await runSend(env, send.id);
+    expect((await sends.getSend(env.DB, send.id))!.c_accepted).toBe(2);
+
+    // A delivered receipt for one recipient moves it accepted → delivered.
+    await applyDeliveryEvents(env.DB, [
+      { type: "delivered", providerId: `fake-${send.id}:d@example.com` },
+    ]);
+    let row = await expectCountersMatchAggregate(send.id);
+    expect(row.c_delivered).toBe(1);
+    expect(row.c_accepted).toBe(1);
+
+    // A hard bounce for the other suppresses it (I1) and moves accepted → bounced.
+    await applyDeliveryEvents(env.DB, [
+      { type: "bounced", hard: true, providerId: `fake-${send.id}:e@example.com` },
+    ]);
+    row = await expectCountersMatchAggregate(send.id);
+    expect(row.c_bounced).toBe(1);
+    expect(row.c_accepted).toBe(0);
+  });
+
+  it("recomputeSendCounters rebuilds the cache from deliveries", async () => {
+    await seedConfirmed("f@example.com");
+    const send = await frozenSend(Date.now() - 1000);
+    await runSend(env, send.id);
+    // Corrupt the cache, then rebuild it.
+    await env.DB.prepare("UPDATE sends SET c_accepted = 999, c_pending = 42 WHERE id = ?")
+      .bind(send.id)
+      .run();
+    await sends.recomputeSendCounters(env.DB, send.id);
+    await expectCountersMatchAggregate(send.id);
+  });
+});
+
+describe("a send's view on GET /api/sends/:id", () => {
+  it("reports the counters and a derived phase", async () => {
+    await seedConfirmed("p1@example.com");
+    await seedConfirmed("p2@example.com");
+    const send = await frozenSend(Date.now() - 1000);
+    await runSend(env, send.id);
+
+    const res = await SELF.fetch(`${base}/api/sends/${send.id}`, { headers: AUTH });
+    expect(res.status).toBe(200);
+    const body = ((await res.json()) as any).send;
+    expect(body.status).toBe("sent");
+    // Everyone accepted, none confirmed yet → still settling.
+    expect(body.phase).toBe("settling");
+    expect(body.audience).toMatchObject({ count: 2, fixed: true });
+    expect(body.counts.accepted).toBe(2);
+    expect(body.dispatch.percent).toBe(100);
+    expect(body.delivery.confirmed).toBe(0);
+    expect(has(body, "wedged")).toBe(false);
+    expect(body.provider.name).toBe("fake");
+  });
+
+  it("reports the sending state as backing_off after a transient whole-batch failure", async () => {
+    await seedConfirmed("q1@example.com");
+    const send = await frozenSend(Date.now() - 1000);
+    failFakeSendBatch(1);
+    await runSend(env, send.id); // requeues, leaves it sending with pending rows
+
+    const body = (
+      (await (await SELF.fetch(`${base}/api/sends/${send.id}`, { headers: AUTH })).json()) as any
+    ).send;
+    expect(body.status).toBe("sending");
+    expect(body.phase).toBe("backing_off"); // work remains, nothing in flight
+    expect(body.counts.pending).toBe(1);
+  });
+
+  it("flags a send in flight too long as stuck, the same on its list row as on its progress", async () => {
+    await seedConfirmed("s1@example.com");
+    const send = await frozenSend(Date.now() - 1000);
+    failFakeSendBatch(1);
+    await runSend(env, send.id); // left sending, with the recipient back in the queue
+    const read = async () => {
+      const list = (await (
+        await SELF.fetch(`${base}/api/sends?status=sending`, { headers: AUTH })
+      ).json()) as any;
+      const progress = (
+        (await (await SELF.fetch(`${base}/api/sends/${send.id}`, { headers: AUTH })).json()) as any
+      ).send;
+      return [
+        has(
+          list.sends.find((r: any) => r.id === send.id),
+          "stuck",
+        ),
+        has(progress, "stuck"),
+      ];
+    };
+    expect(await read()).toEqual([false, false]);
+    // Started long ago is not enough: the outage's retry still explains the wait.
+    await env.DB.prepare("UPDATE sends SET started_at = ? WHERE id = ?")
+      .bind(Date.now() - 2 * STUCK_THRESHOLD_MS, send.id)
+      .run();
+    expect(await read()).toEqual([false, false]);
+    // Idle past the stuck threshold, its retry long due and never run (SPEC §12): both
+    // surfaces say so.
+    await env.DB.prepare("UPDATE sends SET halt_retry_at = ? WHERE id = ?")
+      .bind(Date.now() - STUCK_THRESHOLD_MS - 60_000, send.id)
+      .run();
+    expect(await read()).toEqual([true, true]);
+  });
+
+  it("404s an unknown send and 401s without auth", async () => {
+    expect((await SELF.fetch(`${base}/api/sends/nope`, { headers: AUTH })).status).toBe(404);
+    expect((await SELF.fetch(`${base}/api/sends/nope`)).status).toBe(401);
+  });
+});
+
+// Phase derivation is pure — exercise every branch off a fabricated row.
+describe("buildSendView — derived phase", () => {
+  function mkSend(over: Partial<SendRow>): SendRow {
+    return {
+      id: "s",
+      post_id: "p",
+      status: "sending",
+      fire_at: Date.now(),
+      rendered_html: "",
+      rendered_text: "",
+      subject: "s",
+      web_link: "unlisted",
+      render_warnings: "[]",
+      recipient_count: 0,
+      locked_until: null,
+      scheduled_at: Date.now(),
+      started_at: Date.now() - 60_000,
+      completed_at: null,
+      audience_resolved_at: Date.now() - 60_000,
+      remade_at: null,
+      tested_at: null,
+      halt_reason: null,
+      halt_cause: null,
+      halt_error: null,
+      halted_at: null,
+      halt_retries: 0,
+      halt_retry_at: null,
+      progress_at: null,
+      c_pending: 0,
+      c_in_flight: 0,
+      c_accepted: 0,
+      c_delivered: 0,
+      c_bounced: 0,
+      c_complained: 0,
+      c_skipped: 0,
+      c_unsent: 0,
+      rev: 0,
+      ...over,
+    };
+  }
+  const phase = (over: Partial<SendRow>, hasRetries = false) =>
+    viewOf(mkSend(over), "fake", hasRetries, Date.now()).phase;
+
+  it("scheduled in the review window, due once the fire time passes, missed only past the threshold", () => {
+    const now = Date.now();
+    const at = (fire_at: number) =>
+      viewOf(mkSend({ status: "scheduled", fire_at, started_at: null }), "fake", false, now);
+    expect(at(now + 60_000).phase).toBe("scheduled");
+    expect(at(now).phase).toBe("due"); // the fire time itself: the next tick starts it
+    const late = at(now - 60_000); // an ordinary slow tick is never a miss (SPEC §12)
+    expect([late.phase, has(late, "missed")]).toEqual(["due", false]);
+    const missed = at(now - MISSED_THRESHOLD_MS - 1);
+    expect([missed.phase, has(missed, "missed")]).toEqual(["due", true]);
+  });
+  it("progressing while handing off with no retries", () => {
+    expect(phase({ status: "sending", c_pending: 5, c_in_flight: 3 })).toBe("progressing");
+  });
+  it("retrying while handing off with a retried recipient", () => {
+    expect(phase({ status: "sending", c_pending: 5, c_in_flight: 3 }, true)).toBe("retrying");
+  });
+  it("progressing when work remains between ticks and nothing failed", () => {
+    // A send too large for one tick's budget waits for the next: healthy, not a back-off.
+    expect(phase({ status: "sending", c_pending: 5, c_in_flight: 0 })).toBe("progressing");
+  });
+  it("backing_off when nothing is in flight and recipients wait on a retry", () => {
+    expect(phase({ status: "sending", c_pending: 5, c_in_flight: 0 }, true)).toBe("backing_off");
+  });
+  it("needs_attention (wedged) when nothing is pending but rows are stuck in flight", () => {
+    expect(phase({ status: "sending", c_pending: 0, c_in_flight: 2 })).toBe("needs_attention");
+  });
+  it("progressing (NOT needs_attention) while the loop holds the lease on the final batch", () => {
+    // pending 0, in flight > 0, but the loop is actively working it (lease in the future):
+    // the tail of a normal dispatch, not a wedge. Without the lease check this flashed
+    // "needs attention" at the end of every send.
+    expect(
+      phase({ status: "sending", c_pending: 0, c_in_flight: 2, locked_until: Date.now() + 60_000 }),
+    ).toBe("progressing");
+  });
+  it("settling once sent while receipts are outstanding, complete when confirmed", () => {
+    expect(phase({ status: "sent", c_accepted: 4 })).toBe("settling");
+    expect(phase({ status: "sent", c_accepted: 0, c_delivered: 4 })).toBe("complete");
+  });
+  it("needs_attention, flagged refused with the provider's words, when the account is refused", () => {
+    const since = Date.now() - 120_000;
+    const prog = viewOf(
+      mkSend({
+        status: "sending",
+        c_pending: 5,
+        halt_reason: "account",
+        halt_cause: "credentials",
+        halt_error:
+          "ses 403 UnrecognizedClientException: The security token included in the request is invalid",
+        halted_at: since,
+        halt_retries: 2,
+        halt_retry_at: since + 20 * 60_000,
+      }),
+      "ses",
+      false,
+      Date.now(),
+    );
+    expect(prog.phase).toBe("needs_attention");
+    expect(has(prog, "refused")).toBe(true);
+    expect(has(prog, "wedged")).toBe(false);
+    expect(prog.provider.halt).toEqual({
+      reason: "account",
+      cause: "credentials",
+      error:
+        "ses 403 UnrecognizedClientException: The security token included in the request is invalid",
+      retries: 2,
+      since,
+      retry_at: since + 20 * 60_000,
+    });
+  });
+  it("backing_off with its retry and no time to finish while an outage pauses it, even with a batch awaiting Resolve (SPEC §12)", () => {
+    const now = Date.now();
+    const paused = {
+      status: "sending" as const,
+      recipient_count: 10,
+      c_pending: 5,
+      c_in_flight: 3, // the batch the provider never answered: it waits for Resolve
+      c_accepted: 2,
+      halt_reason: "unavailable" as const,
+      halt_cause: "outage" as const,
+      halt_error: "no answer",
+      halted_at: now - 60_000,
+      halt_retries: 2,
+      halt_retry_at: now + 5 * 60_000,
+    };
+    const prog = viewOf(mkSend(paused), "ses", false, now);
+    expect(prog.phase).toBe("backing_off");
+    expect(prog.provider.halt?.retry_at).toBe(now + 5 * 60_000);
+    expect(prog.dispatch.eta_ms).toBeNull();
+    expect(phase(paused, true)).toBe("backing_off"); // with a retried recipient too
+    // The provider answering a batch ends the halt: progressing again.
+    const answered = { ...paused, halt_reason: null, halt_cause: null, halt_error: null };
+    expect(phase({ ...answered, halted_at: null, halt_retries: 0, halt_retry_at: null })).toBe(
+      "progressing",
+    );
+    // Nothing left to send but the batch awaiting Resolve: needs attention, as ever.
+    expect(phase({ ...paused, c_pending: 0 })).toBe("needs_attention");
+  });
+  it("backing_off, not refused, while the provider is only unavailable", () => {
+    const prog = viewOf(
+      mkSend({ status: "sending", c_pending: 5, halt_reason: "unavailable", halt_error: "503" }),
+      "ses",
+      false,
+      Date.now(),
+    );
+    expect(prog.phase).toBe("backing_off");
+    expect(has(prog, "refused")).toBe(false);
+    expect(prog.provider.halt?.reason).toBe("unavailable");
+  });
+  it("flags a wedged send in attention with its count, but never while the lease is held", () => {
+    const wedged = viewOf(mkSend({ status: "sending", c_in_flight: 3 }), "fake", false, Date.now());
+    expect(has(wedged, "wedged")).toBe(true);
+    expect(condition(wedged, "wedged")?.count).toBe(3);
+    // Same counts, but the loop holds the lease → actively working, not wedged.
+    const working = viewOf(
+      mkSend({ status: "sending", c_in_flight: 3, locked_until: Date.now() + 60_000 }),
+      "fake",
+      false,
+      Date.now(),
+    );
+    expect(has(working, "wedged")).toBe(false);
+  });
+});
+
+describe("resolve keeps counters consistent", () => {
+  it("moves the adjudicated in-flight rows into the chosen bucket", async () => {
+    await seedConfirmed("w1@example.com");
+    const send = await frozenSend(Date.now() - 1000);
+    // Manufacture a wedged row: dispatched, in flight, with the send left sending.
+    await runSend(env, send.id);
+    await env.DB.prepare("UPDATE sends SET status = 'sending', completed_at = NULL WHERE id = ?")
+      .bind(send.id)
+      .run();
+    await env.DB.prepare(
+      "UPDATE deliveries SET status = 'dispatched', event = NULL WHERE send_id = ?",
+    )
+      .bind(send.id)
+      .run();
+    await sends.recomputeSendCounters(env.DB, send.id); // baseline the cache to the manufactured state
+    expect((await sends.getSend(env.DB, send.id))!.c_in_flight).toBe(1);
+
+    await resolveStuckSend(env, send.id, "unsent", person("tester@example.com"));
+    const row = await expectCountersMatchAggregate(send.id);
+    expect(row.status).toBe("sent");
+    expect(row.c_unsent).toBe(1);
+    expect(row.c_in_flight).toBe(0);
+  });
+});
+
+/**
+ * A D1 handle whose batches wait until `n` of them have been asked for, then run in the
+ * order asked: every caller's reads land before any caller's write, the interleaving two
+ * webhooks for one message produce when they arrive together.
+ */
+function batchesMeetAt(db: D1Database, n: number): D1Database {
+  let waiting = 0;
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  let chain = Promise.resolve();
+  return new Proxy(db, {
+    get(target, prop) {
+      if (prop === "batch") {
+        return async (statements: D1PreparedStatement[]) => {
+          waiting += 1;
+          if (waiting >= n) {
+            open();
+          }
+          await gate;
+          const run = chain.then(() => target.batch(statements));
+          chain = run.then(
+            () => undefined,
+            () => undefined,
+          );
+          return run;
+        };
+      }
+      const value = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+describe("receipts racing for one recipient", () => {
+  it("move the counters once, from where the winner left the row", async () => {
+    await seedConfirmed("race@example.com");
+    const send = await frozenSend(Date.now() - 1000);
+    await runSend(env, send.id);
+    const providerId = `fake-${send.id}:race@example.com`;
+
+    // An SES Delivery and a Complaint for the same message, both reading the row as
+    // accepted before either writes.
+    const db = batchesMeetAt(env.DB, 2);
+    const at = Date.now();
+    await Promise.all([
+      sends.markDeliveryEvent(db, { providerId, event: "delivered", at }),
+      sends.markDeliveryEvent(db, { providerId, event: "complained", at }),
+    ]);
+
+    const row = await expectCountersMatchAggregate(send.id);
+    expect(row.c_complained).toBe(1);
+    expect(row.c_delivered).toBe(0);
+    expect(row.c_accepted).toBe(0);
+  });
+
+  it("leave a worse outcome in place when the better one loses the race", async () => {
+    await seedConfirmed("race2@example.com");
+    const send = await frozenSend(Date.now() - 1000);
+    await runSend(env, send.id);
+    const providerId = `fake-${send.id}:race2@example.com`;
+
+    const db = batchesMeetAt(env.DB, 2);
+    const at = Date.now();
+    await Promise.all([
+      sends.markDeliveryEvent(db, { providerId, event: "complained", at }),
+      sends.markDeliveryEvent(db, { providerId, event: "delivered", at }),
+    ]);
+
+    const row = await expectCountersMatchAggregate(send.id);
+    expect(row.c_complained).toBe(1);
+    expect(row.c_delivered).toBe(0);
+    const outcomes = await sends.deliveryOutcomes(env.DB, send.id);
+    expect(outcomes.complained).toBe(1);
+  });
+
+  it("check the counters against the record when a receipt turns a sent send complete", async () => {
+    await seedConfirmed("s1@example.com");
+    await seedConfirmed("s2@example.com");
+    const send = await frozenSend(Date.now() - 1000);
+    await runSend(env, send.id);
+    // A cache that has drifted one short, as the race above used to leave it.
+    await env.DB.prepare("UPDATE sends SET c_accepted = 1, c_delivered = 1 WHERE id = ?")
+      .bind(send.id)
+      .run();
+
+    await applyDeliveryEvents(env.DB, [
+      { type: "delivered", providerId: `fake-${send.id}:s1@example.com` },
+    ]);
+
+    // One recipient still awaits a receipt, so the send is settling, not complete.
+    const row = await expectCountersMatchAggregate(send.id);
+    expect(row.c_accepted).toBe(1);
+    expect(viewOf(row, "fake", false, Date.now()).phase).toBe("settling");
+  });
+});
+
+describe("a cache that drifted before the receipt rule", () => {
+  it("is rebuilt when a receipt drives its accepted count below zero, so a send already reading complete settles again", async () => {
+    await seedConfirmed("n1@example.com");
+    await seedConfirmed("n2@example.com");
+    const send = await frozenSend(Date.now() - 1000);
+    await runSend(env, send.id);
+    // As the old race left it: one recipient moved out of accepted twice, so the send
+    // reads complete while both still await a receipt.
+    await env.DB.prepare("UPDATE sends SET c_accepted = 0, c_delivered = 2 WHERE id = ?")
+      .bind(send.id)
+      .run();
+
+    await applyDeliveryEvents(env.DB, [
+      { type: "delivered", providerId: `fake-${send.id}:n1@example.com` },
+    ]);
+
+    const row = await expectCountersMatchAggregate(send.id);
+    expect(row.c_accepted).toBe(1);
+    expect(viewOf(row, "fake", false, Date.now()).phase).toBe("settling");
+  });
+});
+
+describe("resolve counts only the rows it moves", () => {
+  it("leaves a row a receipt already reached in its event's bucket", async () => {
+    await seedConfirmed("r1@example.com");
+    await seedConfirmed("r2@example.com");
+    await seedConfirmed("r3@example.com");
+    const send = await frozenSend(Date.now() - 1000);
+    await runSend(env, send.id);
+    // Two recipients left in flight with their fate unknown, one still queued so the send
+    // cannot complete (completion rebuilds the counters, which would hide a bad move).
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE sends SET status = 'sending', completed_at = NULL, locked_until = NULL, lease_token = NULL WHERE id = ?",
+      ).bind(send.id),
+      env.DB.prepare(
+        "UPDATE deliveries SET status = 'dispatched', provider_id = NULL, event = NULL WHERE send_id = ? AND email IN ('r1@example.com', 'r2@example.com')",
+      ).bind(send.id),
+      env.DB.prepare(
+        "UPDATE deliveries SET status = 'pending', provider_id = NULL, event = NULL WHERE send_id = ? AND email = 'r3@example.com'",
+      ).bind(send.id),
+    ]);
+    // One in-flight row carries a receipt. No receipt lands on an open row now
+    // (`markDeliveryEvent`), but a record may already hold one, and Resolve must count it
+    // in its event's bucket.
+    await env.DB.prepare(
+      "UPDATE deliveries SET event = 'delivered', event_at = ? WHERE send_id = ? AND email = 'r1@example.com'",
+    )
+      .bind(Date.now(), send.id)
+      .run();
+    await sends.recomputeSendCounters(env.DB, send.id);
+    await expectCountersMatchAggregate(send.id);
+
+    const lease = await sends.acquireLease(env.DB, send.id, Date.now(), 60_000);
+    const resolved = await sends.resolveDispatched(
+      env.DB,
+      send.id,
+      lease!,
+      "unsent",
+      "test",
+      Date.now(),
+      null,
+    );
+
+    expect(resolved).toBe(2);
+    const row = await expectCountersMatchAggregate(send.id);
+    expect(row.c_in_flight).toBe(0);
+    expect(row.c_unsent).toBe(1);
+    expect(row.c_delivered).toBe(1);
+    expect(row.c_pending).toBe(1);
+  });
+});

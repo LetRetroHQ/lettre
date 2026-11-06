@@ -1,0 +1,39 @@
+# The demo publication
+
+Everything `bun run seed` loads into a local dev server, apart from the subscribers and send history, lives here. Edit these files and run `bun run seed` again to see the change.
+
+- **`publication.md`**: the identity, as front matter only.
+- **`posts/`**: one folder per post, a page bundle: the post is `index.md`, and any image it shows sits beside it (`1-welcome-to-lettre/lettre-logo.png`). The post refers to the image by its filename, as in `![…](lettre-logo.png)`, so the link resolves when you preview the Markdown, and the seed attaches the file to that post. The number in a folder's name sets its place: sent posts go out oldest first in that order, and a post's id (and so its editor URL) follows its position.
+- **`lettre-logo.png`**: the publication logo, named by `publication.md`.
+
+The worker bundles the Markdown files (the `rules` entry in `wrangler.jsonc`) and parses them in `src/dev/demo.ts`, which lists each post's folder; add a post by adding its folder and one line there. `bun run dev` watches this folder, so an edit here is in the next seed. `cli/seed.mjs` uploads the images through the running dev server, which stores them in local R2. The subscribers, the four completed sends, and the scheduled send's fire time come from the timeline in `src/dev/seed.ts`. The first post, `0-test-email`, is the operator's test send, made the way Verify it works has them make one: email only, to their own second address alone, before the list came in. That address subscribed just before it and unsubscribed just after, so it's in no later send.
+
+## Front matter
+
+Every file opens with `key: value` lines between `---` markers. An unknown or repeated key, a missing required key, or a post with no body stops the seed with the file's name.
+
+`publication.md`:
+
+| Key | Required | What it sets |
+|---|---|---|
+| `name` | yes | The publication name. |
+| `tagline` | yes | The tagline under the name. |
+| `test_recipients` | yes | The default test inboxes, comma-separated. Keep them on `.example` so a test can never reach a real inbox. |
+| `address` | no | The mailing address in the email footer. |
+| `logo` | no | The logo file in this folder. |
+
+A post:
+
+| Key | Required | What it sets |
+|---|---|---|
+| `subject` | yes | The subject line, which is also the post's title in the list. |
+| `slug` | yes | The post's path in the archive. |
+| `status` | yes | `sent`, `scheduled`, or `draft`. The seed timeline has four completed sends, so at most four posts can be `sent` without `sent_to`. |
+| `edited` | no | Drafts only: when the draft was last edited, as `2 days ago`. |
+| `email_only` | no | Sent or scheduled posts: `true` to send it without listing it in the archive or on the home page. |
+| `sent_to` | no | Sent posts only: a test send to just these addresses, comma-separated, before the list is imported, instead of a timeline send. Keep them on `.example`. |
+
+## The images
+
+- **`lettre-logo.png`**: A 512 px square rendering of the Lettre mark. A PNG, since the logo rides in every email and most email apps don't show SVG. Leave the corners square; the app rounds them. If it's missing, the seed still runs and the dashboard shows its default Lettre mark.
+- **`posts/1-welcome-to-lettre/lettre-logo.png`**: the Lettre mark, included as a sample post image. WebP, PNG, GIF, and JPEG all work. If it's missing, the seed still runs, but that one image 404s in the post until the file is back.

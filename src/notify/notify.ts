@@ -1,0 +1,218 @@
+/**
+ * The sweep's last step: tell the publisher about what happened to their sends and whether
+ * email is getting out (SPEC §8).
+ *
+ * Each tick records every new event once (`recordNotifications`), then delivers the
+ * pending ones through the channel to every address set, as many as its share of the
+ * invocation's subrequest budget allows (`budget.ts`); what does not fit waits for the next
+ * tick. Every statement is metered and every delivery charged, so notifying never pushes a
+ * tick past its cap. Each address is its own delivery: the row keeps the ones a
+ * notification has reached, and a later try goes only to the ones it missed (SPEC §8). The
+ * reserve covers one address, so a tick the sends left short can reach some addresses and
+ * leave the rest for the next, which doesn't count against the notification's tries.
+ *
+ * It runs after the sends, reads the send record, and writes only its own table, so a
+ * notification that fails, or this whole step throwing, never changes a send (I1 to I6).
+ * Each delivery is logged (`notify.sent` or `notify.failed`), and a failure is also kept on
+ * the row, where the settings surface shows it. A problem that has cleared by the time its
+ * notification is tried (after a channel failure delayed it) is closed as cleared rather
+ * than sent, since the email is written from the send as it stands and would describe
+ * something no longer true.
+ */
+
+import type { SendingRefusal } from "../../shared/provider";
+import { missedAddresses, type NotificationTestMiss } from "../../shared/settings";
+import * as notifications from "../db/notifications";
+import { readSending } from "../db/sending";
+import { getSettings } from "../db/settings";
+import type { AppEnv } from "../env";
+import { getConfig } from "../env";
+import { errorText, log } from "../lib/log";
+import { MAX_NOTIFY_ATTEMPTS, MISSED_THRESHOLD_MS } from "../lib/time";
+import { unwrap } from "../lib/unwrap";
+import { type Budget, metered } from "../send/budget";
+import { idleSince } from "../send/stuck";
+import { isWedged } from "../send/wedged";
+import { Contacts, sendingView } from "../services/sending";
+import { getNotifier } from "./channel";
+import {
+  composeNotification,
+  composeOutageNotification,
+  composeSandboxNotification,
+} from "./compose";
+
+/** Record the events, list the due, read the destinations, and claim them: four statements. */
+const OPEN_COST = 4;
+/** One delivery to one address: the channel's request and recording how it went. A
+ *  notification to several addresses spends a request for each beyond the first. */
+const EACH_COST = 2;
+/** What a tick holds back so it can always deliver at least one notification to one address.
+ *  Not one to every address: that much held back every minute would slow the sends, so the
+ *  addresses a tick can't afford wait for the next. */
+export const NOTIFY_RESERVE = OPEN_COST + EACH_COST;
+/** The most a tick delivers, however much budget is left, so a backlog drains steadily. */
+const MAX_PER_TICK = 10;
+
+/** A notice that email isn't going out, the first of an outage or the one further (SPEC §8). */
+function isOutageNotice(n: notifications.DueAny): n is notifications.DueNotSendingNotification {
+  return n.kind === "not_sending" || n.kind === "not_sending_held";
+}
+
+/**
+ * Whether the event a notification tells of is still true of the send now. A finished
+ * send stays finished, and a send that went out late stays late; the other problems can
+ * clear (the refusal lifts, the send completes, Resolve settles the wedge, a reschedule
+ * moves the fire time), and the tests here mirror the conditions `recordNotifications`
+ * recorded them under.
+ */
+export function stillHolds(n: notifications.DueAny, now: number): boolean {
+  switch (n.kind) {
+    case "sandbox":
+      return true;
+    case "not_sending":
+    case "not_sending_held":
+      // Whether email is still refusing is read where it is delivered (`notifyPublisher`).
+      return true;
+    case "finished":
+      return true;
+    case "no_receipts":
+      return !n.receipt_since;
+    case "refused":
+      // A wedged send is no longer retried, whatever halt it last carried, so it waits on
+      // Resolve, not on the refusal (as its conditions say).
+      return (
+        n.send_status === "sending" &&
+        n.halt_reason === "account" &&
+        n.halted_at === n.episode &&
+        !isWedged({ ...n, status: n.send_status })
+      );
+    case "stuck":
+      return idleSince({ ...n, status: n.send_status }) === n.episode;
+    case "wedged":
+      return isWedged({ ...n, status: n.send_status });
+    case "missed":
+      // Once it has gone out, its Sent email says how late.
+      return n.send_status === "scheduled" && n.fire_at < now - MISSED_THRESHOLD_MS;
+  }
+}
+
+/** `contacts` takes what the provider channel's answers say about the account (SPEC §13),
+ *  for the caller to record; a caller that records none leaves it out. */
+export async function notifyPublisher(
+  env: AppEnv,
+  budget: Budget,
+  contacts: Contacts = new Contacts(),
+): Promise<void> {
+  const config = getConfig(env);
+  const db = metered(env.DB, budget);
+  const now = Date.now();
+
+  await notifications.recordNotifications(db, now);
+  const room = Math.min(
+    MAX_PER_TICK,
+    Math.floor((budget.left - (OPEN_COST - 1)) / EACH_COST),
+    budget.queriesLeft - (OPEN_COST - 1),
+  );
+  if (room < 1) {
+    return;
+  }
+  let due = await notifications.dueNotifications(db, room);
+  if (due.length === 0) {
+    return;
+  }
+  // A notice that email isn't going out is told from the refusal and the posts it holds as they
+  // stand, read once, and only when one is due. The reads take places in the list when the tick
+  // has no room to spare, and a tick with only its reserve leaves them all for one with more.
+  let refusal: SendingRefusal | null = null;
+  let since = now;
+  let held: string[] = [];
+  if (due.some(isOutageNotice)) {
+    const view = sendingView(config, await readSending(db));
+    refusal = view?.refusal ?? null;
+    since = view?.since ?? now;
+    held = await notifications.postsHeldByOutage(db);
+    due = due.slice(0, Math.floor((budget.left - (OPEN_COST - 2)) / EACH_COST));
+    if (due.length === 0) {
+      return;
+    }
+  }
+  const { to } = (await getSettings(db)).notifications;
+  if (to.length === 0) {
+    await notifications.closeUnaddressed(db, now);
+    return;
+  }
+  await notifications.claimNotifications(db, due, now);
+
+  const notifier = getNotifier(config, env);
+  for (const [i, n] of due.entries()) {
+    // Every claimed notification still to come needs its outcome recorded, this one included.
+    const recordsLeft = due.length - i;
+    if (n.kind === "not_sending_held" && refusal && held.length === 0) {
+      await notifications.forgetNotification(db, n);
+      continue;
+    }
+    if (!stillHolds(n, Date.now()) || (isOutageNotice(n) && !refusal)) {
+      await notifications.recordNotificationOutcome(db, n, { status: "cleared" }, Date.now());
+      continue;
+    }
+    const about = n.send_id === null ? {} : { sendId: n.send_id };
+    const key = `${n.send_id ?? "account"}-${n.kind}-${n.episode}`;
+    const write = () =>
+      n.kind === "sandbox"
+        ? composeSandboxNotification(config)
+        : isOutageNotice(n)
+          ? composeOutageNotification(unwrap(refusal, "the refusal"), since, held, config)
+          : composeNotification(n, config);
+    let email: ReturnType<typeof write> | undefined;
+    // Only the addresses it hasn't reached: one that got it on an earlier try never gets it
+    // again because another failed.
+    const sentTo = [...n.sent_to];
+    const missed: NotificationTestMiss[] = [];
+    let deferred = false;
+    for (const address of to.filter((a) => !n.sent_to.includes(a))) {
+      if (budget.left < recordsLeft + 1) {
+        deferred = true; // this tick can't afford the request; the next one tries it
+        break;
+      }
+      budget.request(); // the channel's request, which counts whether or not it succeeds
+      try {
+        email ??= write();
+        await notifier.send(address, email, key, contacts);
+        sentTo.push(address);
+      } catch (err) {
+        missed.push({ email: address, error: errorText(err) });
+      }
+    }
+    if (missed.length === 0) {
+      if (deferred) {
+        await notifications.recordNotificationOutcome(
+          db,
+          n,
+          { status: "deferred", sentTo },
+          Date.now(),
+        );
+        continue;
+      }
+      await notifications.recordNotificationOutcome(db, n, { status: "sent", sentTo }, Date.now());
+      log.info("notify.sent", { ...about, kind: n.kind, channel: notifier.channel });
+      continue;
+    }
+    const giveUp = n.attempts + 1 >= MAX_NOTIFY_ATTEMPTS;
+    // One line for each address missed, without the address (logs never carry one).
+    for (const m of missed) {
+      log.warn("notify.failed", {
+        ...about,
+        kind: n.kind,
+        channel: notifier.channel,
+        error: m.error,
+        giveUp,
+      });
+    }
+    await notifications.recordNotificationOutcome(
+      db,
+      n,
+      { status: "unsent", sentTo, error: missedAddresses(to, missed), giveUp },
+      Date.now(),
+    );
+  }
+}

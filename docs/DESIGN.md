@@ -1,0 +1,648 @@
+# Lettre design
+
+How the admin UI presents what Lettre does. `docs/SPEC.md` says what the system guarantees and how it behaves; this document says which screen, control, color, and words show that behavior to the publisher. Where the two meet, the spec decides the behavior and this document decides the presentation, and neither restates the other.
+
+**Who it's for.** Anyone about to change the editor, or trying to understand why it looks the way it does: a person or a Claude agent adding a screen, a control, a message, or a color.
+
+**How to read it.** The principles (§1) are the reasons; most rules later in the document follow from one of them. §2 is a map of the app, §3 walks each screen, and §4 follows a send across all of them. §5 to §11 are the shared vocabulary every screen is built from: where messages go, how saving works, the button roles, color, layout, copy, and accessibility. §12 lists what was left out on purpose, and §13 is a checklist for a change.
+
+**What it doesn't hold.** Exact CSS lives in `public/dashboard/styles.css` and behavior in `client/`; this document names what each piece means and which one to reach for, one level above the declarations. How the SPA is mounted is `.claude/rules/client.md`, and how it is built is `.claude/rules/client-build.md`.
+
+**Keeping it true.** A change to how the UI presents something updates this document in the same commit. When this document and the code disagree, one of them is a bug: flag it rather than quietly editing either to match.
+
+---
+
+## 1. Principles
+
+Lettre is one publication, written by one person, through two clients (this editor and Claude) over one API, and its sends can't be taken back (SPEC §1). Each principle below follows from that.
+
+**1.1 The review window is always in view.** Every send exists as a visible, cancelable send before any mail leaves (I6), and a window no one can see into is not a review. Wherever a scheduled send appears, it shows its fire time and a countdown, and the controls that act on the window (Edit schedule, Cancel) appear for exactly as long as the server would accept them. Scheduling is the main path; sending now is a demoted choice inside the Schedule dialog.
+
+**1.2 The server decides; the page shows.** What is wrong with a send, what can be done to it, and how often to look again are the server's answers (SPEC §8, `docs/API.md`). A page never derives a condition, a threshold, or whether a control would work. A control appears when the send's actions offer it, and a problem appears in the server's own words. Claude reads the same answers, so the two clients can't disagree. The one rule a page applies on its own clock is taking a scheduled send's window controls away at its fire time.
+
+**1.3 Quiet unless someone must act.** Most of the time nothing is wrong, and the UI says nothing about it: no "all systems normal" banner, no green checks on healthy sends. The few conditions the spec names (a missed fire time, a wedged send, a refusing provider, a send in flight too long, a bounce spike, no provider connected) are the only things that surface loudly, and they stay in view until they clear.
+
+**1.4 What you preview is what sends.** The preview, the test, and the send share one render path (I5), so the UI presents the preview as the email itself and the test as the thing to trust. Once a post is scheduled, every view of it shows the frozen copy (I3). Anything that is not the render path, such as the Template page's sample, is labelled as a sample and points to the test.
+
+**1.5 Never lose words without saying so.** A draft autosaves, and a save that would overwrite another writer's newer version stops and asks instead (SPEC §4). Leaving the editor saves in the background; a leave that could lose words asks first.
+
+**1.6 Explain in place, and point to the way out.** A refusal or a lock is explained where the publisher meets it: the empty subject under the Subject field, "Cancel the schedule to edit" on the locked composer, the not-connected line inside the dialog it disables. A message that only says "no" is incomplete; it names the next step.
+
+**1.7 Deploy facts are shown, never edited.** The provider, the sender, the origins, and the notification channel are deployment configuration (SPEC §9). The UI shows them read-only, beside the guide that changes them, and never offers a field for them.
+
+**1.8 A small vocabulary, used the same way everywhere.** One class per button role, one home per kind of message, one meaning per color, one word per concept. A new treatment is a smell: reach for an existing one first, and if none fits, change this document in the same commit as the code.
+
+---
+
+## 2. The app at a glance
+
+### What this covers
+
+The **admin UI**: the editor and authoring screens behind auth, at `/dashboard`. The reader surface (the home page, the archive, post pages, and the subscribe, confirm, and unsubscribe pages) belongs to SPEC §5 and §11 and is not styled from these tokens.
+
+Two pieces of the app's own chrome do appear on reader pages, and only the publisher ever sees them: the dev-only **Open dashboard** pill on a local instance (SPEC §5), and the strip across the top of a test's unsubscribe pages, saying they only show what a subscriber would see (SPEC §7). Both are the app speaking to the publisher, not the publication, so they wear the brand accent rather than the reader's ink. The strip runs the window's full width above the publication's masthead, so the masthead beneath it is exactly the one a reader gets.
+
+### The shell
+
+A sidebar sits beside the routed view:
+
+- **Brand** at the top: the publication's logo, name, and tagline, linking to the Dashboard, then **View publication ↗**.
+- **Navigation**, one flat list: Dashboard, Drafts, Sent, Subscribers, Template, Settings.
+- **Foot**: who is signed in (or "Local dev"), the Lettre mark that opens Docs, and the collapse control.
+
+The sidebar is full width on a wide window, an icon rail on a mid-size one, and a drawer below 540px. The collapse control overrides full or rail for the current page load only, so a reload always starts from the width-based default.
+
+The editor, the web version, the docs, and the walls hide the sidebar: writing wants the full width, the web version is a page of its own, the docs are about Lettre rather than the publication, and a wall stands alone.
+
+The sidebar is the publication's, so it belongs to someone signed in: it appears once the app knows who is asking, already showing the publication's name, and until then the page is empty.
+
+The browser tab names the screen open with one title, then Lettre, so a tab among others, a bookmark, or a history entry says where it leads: "Subscribers - Lettre", a post or a send's page by its subject ("Welcome - Lettre", kept to the subject as it is typed), a set of docs by its name ("Publishing docs - Lettre"), and a doc by its title. The web version reads "Welcome (web version) - Lettre", apart from the editor's tab it is opened beside. A screen still loading shows its room's name until it has read what it shows. Nothing in the title changes with a send's progress.
+
+### Screens
+
+| Screen | Route | What it answers |
+| --- | --- | --- |
+| Dashboard | `#/dashboard` | Is anything wrong, who is on the list, what's scheduled, what went out. |
+| Drafts | `#/drafts` | What am I writing. Drafts and scheduled posts. |
+| Editor | `#/edit/:post` | Write, preview, test, and schedule a post; review a scheduled one. |
+| Web version | `#/web/post/:post` | How the post's public page will look, before it is public. |
+| Sent | `#/sent` | What needs attention, what's queued, what's going out, what went out. |
+| Send page | `#/sent/:send` | How one send is going (the watch) or went (the record). |
+| Subscribers | `#/subscribers` | Who is on the list, and in what state. |
+| Subscriber | `#/subscribers/:subscriber` | One person: how they joined, their suppression, why they left, and every send they were in. |
+| Import subscribers | `#/subscribers/import` | What bringing a list in would do, before it does it. |
+| Template | `#/template` | The one email template every post is sent in. |
+| Settings | `#/settings` | The publication's preferences, and the deploy facts read-only. |
+| Docs and API | `#/docs`, `#/api-reference` | The docs, as two sets (Publishing and Self-hosting), and the API reference, served by the instance. An old `#/reference` link opens the same place under `#/api-reference`. |
+
+The admin UI may link out to public pages (View publication, Archive ↗, View published post ↗). No public page links or redirects into `/dashboard` (SPEC §11), apart from the dev-only pill above.
+
+### Where a post lives
+
+SPEC §8 splits the publisher's world into a writing side and a dispatch side, and a post's send, not the post, decides which side it is on. The routing enforces the split, so an editable-looking page is never shown for something that can no longer be edited.
+
+| The post's send | Opens at | Shown as |
+| --- | --- | --- |
+| none, or canceled | Editor | an editable draft |
+| scheduled | Editor | locked, with the scheduled banner |
+| sending | Send page | the live watch |
+| sent | Send page | the record |
+
+A page that finds its subject has moved on (an editor link to a post now sending) hands off and replaces its history entry, so Back returns to where the publisher came from. A hand-off the publisher didn't cause, such as a send starting while the editor is open, is announced with a toast saying why the page changed.
+
+### Walls
+
+Five states replace the whole app with one card, because no screen could do anything useful behind them. Each tears down the mounted view so nothing keeps calling, hides the publication's chrome, and moves focus to its heading.
+
+- **The configuration is refused** (SPEC §9). Every call fails the same way, so the wall says a setting needs fixing and nothing is sent until it is, gives the server's own words about what's wrong, and links the section of the published configuration reference that lists that setting (the in-app docs are behind the same refusal). How to fix a setting is the reference's to say, so the wall can't drift from it. One control, **Reload** (Primary), since the fix happens outside the app. It carries `role="alert"`.
+- **The database needs updating** (SPEC §9): the database hasn't run every migration the release ships. The same wall as a refused configuration, with the server's words naming the missing migrations and what to run, and no reference link, since no setting is wrong. The server gives this refusal before it looks at who is asking, so it shows ahead of the walls below.
+- **The editor is locked until Access is set up** (SPEC §11). There was never a session, so signing in again can't help. The wall says the editor is locked until Access is in front of it, that this is expected on a new deployment and the public pages work, and links the Access guide on the project's site. One control, **Reload**. It carries no `role="alert"`, since it is an expected state; focus moving to the heading announces it.
+- **Access let you in, but didn't say who you are** (SPEC §11): an Access login that named neither a person nor a service token, which some other kind of Access policy let through. Signing in the same way again gets the same answer, so the wall says what Access sent and why Lettre needs more, names the two kinds of policy it accepts (an Allow policy on people's emails, and a Service Auth policy on a service token), and links the Access guide on the project's site. One control, **Sign out** (Primary), which ends the Access session so the next visit signs in afresh, perhaps another way. It carries `role="alert"`, since a policy needs changing.
+- **The session has expired.** One control, **Sign in** (Primary), which reloads to start a fresh sign-in.
+
+A wall is drawn once, however many calls fail, and can't be dismissed: there is nothing behind it to return to. Links out of a wall open the project's site in a new tab, since the editor's own Docs tab sits behind the same failure.
+
+### Dialogs and menus belong to their page
+
+Leaving a page, by Back, a link, or a changed URL, closes any dialog or menu it left open, so neither ever sits over a page it wasn't opened for, where its confirm would act on something no longer on screen. Only the surface goes: a write already started from it still lands, and its toast still says so. A save left waiting on a re-make confirmation (§4) is not made, since nobody confirmed it, and a toast on the next page says it wasn't saved.
+
+---
+
+## 3. Screens
+
+Each screen below is described top to bottom, then its own rules.
+
+### Dashboard
+
+The editor's first screen, ordered by urgency:
+
+1. **Head**: the publication's name and tagline, and **New post** (Primary).
+2. **Health block**, only when something needs attention (§4).
+3. **Finish setting up**, until the first post listed in the archive is published (below).
+4. **Active sends**: a card per send in flight, with a small dispatch bar and counts, linking to its watch.
+5. **Subscribers**: four count tiles (Confirmed, Pending, Unsubscribed, Suppressed), each a link into Subscribers filtered to that state.
+6. **Scheduled** and **Drafts**, side by side. A scheduled card shows its countdown and opens the editor; it carries no Cancel, since the schedule is managed in the editor and on the Sent page. A send whose look changed since its last test says so on its card (§4), and an email-only post says so in its line (§4). The Drafts card marks an email-only draft with the Email only mark after its title (§3, Sent posts), and keeps its date on one line.
+7. **Sent**: the latest five sends that have started, with Delivered (§8) and **Archive ↗**, the post's page. An email-only post (SPEC §5) carries the Email only mark after its subject, and its link reads **Web version ↗** and opens its unlisted link, since it has no archive page.
+8. **Quick actions**, **Publication** (the home page's address with Copy, and **View publication ↗**; the archive and every post are a click from there), and **API access**, which invites the publisher to connect Claude or, once a post's current revision came through Claude Code or Claude's connector, says Claude is connected. Before Claude is connected, its **Connect Claude →** link opens the Connect Claude page; once connected, **Working with Claude →** opens that page's Working with Claude section.
+
+**First run.** Until the first post, the body is the setup checklist, **Set up your publication**, under the head and the health block, instead of a wall of zero tiles. It has ten steps in one flat list, with no group headings and no word on whose each step is: **Connect Amazon SES**, **Send a test email**, **Name your publication**, **Get notified**, **Request production access**, **Bring your existing list**, **Write your first post**, **Schedule your first post**, **Send a test email for your first post**, and **Share your subscribe link**. Request production access shows only where there is an SES account to ask about, or none connected yet, and so not on local development's plain stand-in. The Publishing docs' section of the same name follows these steps word for word.
+
+**Finish setting up.** Once a post exists the regular dashboard shows, and the same steps stay as a compact **Finish setting up** card under the health block, until the first post listed in the archive is published (its send has started, the moment the public archive first shows a post). Then setup is done and the card goes. An email-only post, such as Verify it works' test send, neither counts as the first post nor ends setup, so the publisher still gets the guided start after the operator has verified the instance. Setup is worked out from the sends and recorded nowhere, so it follows the archive: unlisting the only listed post reopens it, and listing a sent email-only post closes it. Under its title the card always says "This card stays until your first post goes out to the archive. Email-only sends don’t count.", which answers why setup is still open after an email-only send. The first-run checklist doesn't carry that line, since it stands in for the dashboard before any post exists. The checklist and the card are one component in two layouts, so their steps can't drift apart.
+
+The steps answer the question someone would ask Claude, is this ready and is it working, so each reads only a fact both clients can read (SPEC §13), and nothing is ticked by hand or dismissed: connected while a provider is named; the test once email is working (`sending` on the provider's status), whatever email the provider took; the name once one is set; notifications once an address is saved and the last notification didn't fail; production access once AWS granted it; the list once it has confirmed or pending subscribers; the first post once a post that isn't email only exists, a draft included; its schedule once a listed post has a scheduled send; and its test once that send's frozen email was tested since it was last re-made, since that is the email that goes out. A test sent from a draft is a preview and isn't counted. Sharing can't be known, so it is never ticked.
+
+Finished steps are hidden behind one line above the rest, a solid check and **N done** with a chevron, the same shape however many are done, so after an operator's hand-off the list starts at the publisher's own step. It is a toggle, hidden on each load: shown, the done steps take their places in the one list, so it reads as the whole checklist in order, each done step with a solid check and the fact that ticked it ("Sends through Amazon SES in us-west-2.", "SES accepted an email" and when, "Named “Symbol Soup”.", "Notifications go to 2 addresses.", "AWS granted it.", "43 subscribers on your list.", the first post's subject, "Goes out" and when, and "The email that goes out has been tested."), and a button only where one still leads somewhere: Settings to rename or change where notifications go, **Send test email**, **Subscribers**, and the first post's **Send test**. Its name says what it does ("Show 8 done steps", "Hide 8 done steps"), and it controls the list. Shown stays shown while the card repaints, and the toggle keeps focus, so a background read never hides them or moves focus mid-read. Every row is as tall as one with a button, so a row with only a title doesn't read as squeezed. Each step left has a small ring for where it stands. On the checklist, the first step that can be taken now, past the optional list, has the view's Primary button; on the card none does, since the head's New post is. A step waiting on AWS has a dashed ring: while AWS reviews, Request production access says "Waiting for AWS to grant production access."
+
+A step is blocked only when it truly can't be taken, and then its hint is the step it waits for, in plain muted words, never a link or a color: "After Connect Amazon SES" for Send a test email and Schedule your first post, "After Schedule your first post" for the first post's test, and "After Send a test email" for sharing, which waits for signups to open. A blocked step has no button. Request production access is never blocked; before a request, while the publication has no name, its hint suggests naming it first, since AWS's reviewer looks at it. In the sandbox, scheduling and sharing aren't blocked, since the app allows both. Once email works, their hints say to wait for production access, since a send and a confirmation reach only verified addresses until then. On SES, sharing shows the address and Copy only once the account reads as having production access: in the sandbox, and while Lettre can't read the account or its read failed, it says to share it once AWS grants production access, as the Claude copies do; the access step above says which. With no SES account to ask, as on local development's stand-in, it shows them once signups open. Wherever it shows them, its hint is "Share it before your first post goes out, so readers get it.", since the card goes as soon as that send starts and a post can't reach someone who subscribes after it.
+
+Problems live only in the health block, never on the card: a step a problem is in the way of points up at it with a mark in the line's color: red for "SES is refusing. See why above.", amber for "The last notification didn’t arrive. See why above.". While setup is open, its steps say the two states that aren't problems, no provider connected and the sandbox, so the health block leaves out its amber lines for them and each is said once; a send held for want of a provider, email not going out, and every provider warning are still the health block's. There is no close button: folding keeps the card short.
+
+### Drafts
+
+The writing side: drafts and scheduled posts. A sent post is a record and lives under Sent. The list has search, a Draft or Scheduled filter, sortable columns, and paging. An email-only post carries the Email only mark after its title, as in Sent; a listed one carries nothing. A row opens the editor; a post whose send is in flight shows the `sending` badge and opens its watch instead. The row menu (⋯) offers Open (Watch send, for a post in flight), and Delete draft for a draft, which confirms in a dialog that says the revisions go too and it can't be undone.
+
+### Editor
+
+The editor opens only a draft or a scheduled post (§2), and carries no status pill: the editable layout says draft, and the scheduled banner says scheduled. Opening a post that isn't there toasts that it was deleted and goes to Drafts, rather than showing an error whose Retry can only fail. The subject, the composer, and the actions bar sit on the page itself, with no card around them: the fields and the composer carry their own borders, so a card would only frame frames, and the page lines up with its head and banner. Top to bottom:
+
+- **Head**: ← Drafts on the left. On the right, on a draft, the **Email only** mark (an envelope and muted words, as in the lists) while it is left out of the archive (only the exception is marked; a scheduled post's banner says where it is going instead), **Web version ↗**, and, rightmost, **⚙ Post settings** (Ghost), which opens the post's settings (below). It sits beside Web version because the one shows the public page and the other changes it, and it stays put whether the post is a draft or scheduled. Its words say "Post settings", not "Settings", since the sidebar's Settings is the app's own.
+- **Scheduled banner**, for a scheduled post (§4).
+- **Conflict banner**, when another writer has saved (§5).
+- **Subject**, full width, with nothing under it: where the post will go is in Post settings and the Schedule dialog, and, once it is scheduled, in its banner.
+- **Composer**: **Edit | Preview** tabs, a formatting toolbar, the Markdown, and a foot that takes images ("Paste, drop, or click to add images"). An image is uploaded to the post and referenced by name, never as a URL (SPEC §4).
+- **Actions bar**: **Save draft** with the save cue beside it, **Send test email** (Secondary), and **Schedule** (Primary).
+
+**Scheduling.** Schedule opens a dialog that explains the window, offers a time no earlier than the minimum lead, and confirms with Schedule. A time inside the lead is refused under the picker, in words that say why ("Pick a time at least 5 minutes from now, so there’s time to cancel."). They are the server's words, shown as they arrive when the server's clock catches it, and the editor's own check before asking says the same; Edit schedule's refusal reads the same. Beneath, "Or send as soon as possible." and **Send now →**, a text link, not a button: sending without a chosen time is the lesser path, and a button would sit level with Cancel and undo the demotion. The row says what Send now is for, never that it skips the window, which it never does (I6). The **Send now** view it opens is where the lead is explained, before anything is sent: "Sends this draft, as it is now, to 155 recipients in 5 to 6 minutes. The post locks until then, and you can cancel any time before it starts sending." The range is the lead plus the rounding up to the next minute, the count is who the send will reach (confirmed, less suppressed), and its copy never implies instant delivery. Both views use the deployment's own lead. Under the time (in Send now, under its line) is the same form as **Post settings** (below), showing the post's settings as they stand, so a publisher who decides at send time can change them there. The ticked **Include in archive** states the default, so the line above it doesn't repeat where the post will go. The dialog edits its own copy: a change reaches the post only when Schedule or Send now is pressed, and Cancel leaves the post as it was. The copy carries over between the two views. **← Back to schedule** returns from the Send now view, a text link at the start of its button row, so it takes no row of its own. After scheduling, the publisher stays on the post, now locked, with a toast naming the fire time and "Send yourself a test", because the window is the review and this page is where it happens.
+
+**Post settings.** A dialog with two settings, neither part of the email, and the same form wherever the settings show (Post settings, Schedule, Send now, Edit schedule, and, without its first box, Add to archive):
+
+- **Include in archive**, checked by default, with the helper "Listed on your home page and in your public archive. Unchecked, it’s sent as email only: anyone with the email can still open its web version." Unchecked, the rest of the form goes, since an email-only post has no archive address.
+- **Archive address**: one URL field on one background, its base in grey text and fixed, then the slug, the one part to type. The whole field is the label, so a click on the base lands in the slug, and focusing it selects the slug to type over. While the slug follows the subject, a line under it says so ("Follows the subject until you type your own."); typing takes it by hand, and leaving it empty hands it back to the subject. When another post holds the subject's slug, the post takes the next number and the line says why, in grey beside an info icon, since nothing needs fixing ("Another post has `spring-update`, so a number was added. You can change it above."). A slug the server refuses, malformed or another post's, is said in its words under the field, which turns red, and the dialog stays open with focus in the field. Once the post is sent its address is fixed, so Add to archive shows it read-only, the whole field greyed.
+
+Cancel and Save (Primary): nothing is saved until Save, and Cancel, Escape, or a click outside leaves the post as it was.
+
+**A post with no subject.** Schedule stays enabled, and pressing it marks the Subject field with "Add a subject before you schedule" and moves focus there; the error clears as soon as a subject is typed. A disabled button would refuse without a reason. Send now is inside the same dialog, so the same check guards it. This check is a courtesy; the freeze is the authority (SPEC §6).
+
+**A scheduled post.** The lock is presented without hiding the content, and without locking what isn't part of the email:
+
+- The subject reads as locked: read-only rather than disabled, so it can still be selected and copied and a keystroke still pulses the foot line, but styled to look locked, with the recessed surface, muted text, an arrow cursor, and a grey focus ring in place of the blue one. The body's text is muted the same way, and focus rings the whole composer in the same grey. The banner names where the post is going. **Post settings** still opens and saves, since neither setting is part of the email.
+
+- It opens on **Preview**, since the preview is the copy that will send. The Edit tab is somewhere the publisher goes on purpose.
+- On Edit, the text stays legible, selectable, and copyable on a recessed surface, and the composer's foot says the way out: "Cancel the schedule to edit". It's a hint, not a control; Cancel lives on the banner.
+- An attempted edit (a keystroke that would change the text, a paste, a drop, a toolbar button or its shortcut) is refused and pulses that line once, so the refusal shows where the attempt landed.
+- The toolbar stays in view, its buttons unavailable but still clickable, so a click pulses the same line. The actions bar keeps Send test email alone, with "Not tested yet" beside it until a test lands (§4), and its dialog says it delivers the frozen copy that will fire. A draft's test dialog says it delivers the rendered email.
+
+On a draft's Preview tab, the toolbar and the image foot dim and take no clicks, since either would change text that isn't on screen. Dropping an image still works and switches to Edit, so the insert is seen.
+
+The render's warnings show under the composer in the server's words, in amber, whenever Preview loads and after a test, so a broken image reference is named beside the email it spoils. A warning stays there until the next Preview or test reads the post again.
+
+**Testing.** Send test email opens a dialog that takes one or more addresses and sends each its own test, so one that fails doesn't stop the rest. When every address gets it, the dialog closes with a toast. When some don't, the dialog stays open with only those addresses left in the field and says so above its buttons ("Sent to 1 of 2.", then each reason once with the addresses it covers), so Send again tries just those and no one gets a second copy. The reason is the server's sentence as it stands: the provider's words and the fix, or that the test may have arrived, so the dialog adds no "try again" of its own to a refusal that sending again can't change.
+
+**Three copies, each named for what it is.** The Preview tab is the email; a test is the email in a real inbox; the **Web version ↗** is the post's public page. "View in browser" is not used for the last one: that is the email's own link, the post's unlisted link, worded by the publisher's template. In the Preview tab, that link opens the web version until the post is published, so a publisher who clicks it finds the page rather than "Nothing here yet".
+
+**Unlisted, never private.** The unlisted link is public to anyone who has it, so no label calls it private: it is "unlisted", or described by who can open it ("anyone with the email can open it").
+
+**Framed previews.** Every rendered email or reader page shows in a sandboxed frame (no script, no form), because the post and the template are HTML Claude may write, shown on the admin origin. A link in a framed email opens in a new tab, since most pages refuse to be framed and the preview would go blank. A fragment-only link, such as the sample's `#unsubscribe`, does nothing.
+
+### Web version
+
+The post's public page as it will look (SPEC §5), opened in its own tab with no app chrome. One full-width strip in the brand accent sits above the framed page: a **Web version** tag and "Not public yet". Below the strip, the page is exactly the public page.
+
+- **Why the strip.** It keeps a faithful copy from being mistaken for the live page, and says no more: the publisher opened it from the post, so they know its stage, and where it will go is in Post settings and, once scheduled, the banner. It keeps the name Web version rather than Preview, which is the email.
+- **Opening it.** Web version ↗ saves pending edits first, so the page shows the latest edit. It is a link (Ghost style) that opens a new tab, so no browser blocks it as a pop-up; a browser pane with no tabs opens it in place.
+- **Leaving it.** The strip carries no link, since closing the tab is the way back. The page's links open in a new tab, the strip scrolls away with the page, and the tab's title reads "Web version · " and the subject.
+- **After publishing.** A sending or sent post has no web version to show: its public page is the real thing, so the link goes there, through the post's unlisted link, which forwards to the archive address while the post is listed.
+
+### Sent
+
+The dispatch side, ordered by urgency:
+
+1. **Attention cards** (§4) for sends that need the operator, and a line when no provider is connected.
+2. **Scheduled**: the soonest send as a card with its countdown and **Edit schedule** and **Cancel**; any others fold behind "Show all N scheduled". This queue and the editor's banner are where a schedule is managed (§4).
+3. **In progress**: the active-send cards.
+4. **Sent posts**: search, a filter for sends with delivery failures, and sortable columns. Only the exception is marked: an email-only post carries the **Email only** mark after its subject, an envelope and the words in muted text, and a listed post carries nothing. Words and no pill, so it never reads as a second status beside the row's own; the mark stays whole on its line, and where the columns are fixed (the Drafts and Sent pages, the dashboard's Drafts card) a long title ends in an ellipsis, so the row stays one line tall. The failure filter narrows without reordering: newest first is kept, and no severity ranking is implied, because a ranking would read as a judgment the record doesn't make.
+
+On the dev stand-in, which records sends but delivers nothing, a muted line under the title says so.
+
+### Send page
+
+One page for the whole life of a send once it fires (SPEC §8): the watch while it sends, then the record it becomes, in place.
+
+**The watch** (sending) is observe-only, apart from **Resolve…** (Primary) when the server offers it for a wedged send (SPEC §12). It shows the subject with a phase pill, when it started, who acted on it (§10), any attention alert (§4), and two progress bars on one scale, the audience at fire:
+
+- **Dispatch**: how many the provider has accepted, in the sending blue, with the phase's one-line gloss and, while handing off, the rate and time to finish.
+- **Delivery**: grey up to the accepted count, with green for confirmed deliveries filling in behind, so delivery visibly lags dispatch and never passes it. Its count reads confirmed of accepted.
+
+While a send is paused, or in flight too long, the watch gives no rate or time to finish, which would promise progress nothing is making. A send too large for one sweep, waiting for the next, still reads **Sending**, with a neutral line that it resumes on the next sweep; the amber **Backing off** is kept for a pause after an error. A send paused for a provider outage reads **Backing off** with when it next retries, on its watch and on its In progress card (the Sent list's and the dashboard's), whose line leads with **Backing off** in place of **Sending**; it does so even while a batch the provider never answered waits for Resolve, since nothing goes out before the retry. The moment the provider answers a batch it reads **Sending** again. A send that comes due while another is held by a refusal or an outage is held with it from the start: it reads the same as that send (**Needs attention** with the refusal, or **Backing off** with the outage, and the same next retry), with nothing handed off yet. Its page says so in place of when it started ("Due … · held before handing anyone off · about N recipients"), and the line under its bar says it waits with the send already held. A send in flight too long keeps its **Sending** pill, since it is still open, but its gloss says nothing is being handed off, beside the amber alert that says why, and it gives no time to finish.
+
+**The sent page** splits in two, under the subject, its phase pill, when it was sent, and who acted on it (§10): **The post**, what it is on the web and what can still be done with it, and **Delivery**, how the send went. Each part is a card under a small uppercase label.
+
+- **The post**, in two pieces, because the link and the post's place in the archive are different things. First the **Link**: one field holding the address the post's page answers at, with **Copy** and **Open ↗** attached to it (Open in the accent, as the link's own action), and a line under it: "The link in the email forwards here." while listed, or "Anyone with the link can open it. Nothing lists or indexes it." for email only. Then, under a hairline, where the post stands, in words on the left with the scheduled banner's icon (a link for in the archive, an envelope for email only, never green and grey, since neither state is the better one): "In your archive" ("Listed on your home page and in your public archive.") with **Remove from archive…**, or "Email only" ("Not on your home page or in your public archive.") with **Add to archive…**, each Secondary on the right. The ellipsis is the promise that a dialog comes first, which a checkbox or a switch would not make, since both read as acting at once. The change is the one thing about a sent post that can still change, and what changes is whether it is in the archive, never the record (SPEC §5, I3). Both ask first, in a dialog with Cancel and a Primary act. **Remove from archive…** says the post comes off the home page and the archive and its archive address stops working, including links people have shared, shows the address struck through, and says the email's link keeps working and the address stays the post's, so adding it back brings it back. **Add to archive…** says the post will be listed where anyone visiting can find it, and shows the address it was sent with, read-only ("Its address since it was sent: links people shared work again."). For a post sent before unlisted links, whose emails link its archive address, the Link shows that address, its line says "Its emails link here.", and Remove from archive… says it keeps working for anyone with the email. Each confirmed change toasts.
+- **Delivery** is the record, read-only: a sent post is a frozen record (I3), so its controls are ways to look or ways out: **Export recipients (CSV)** and the recipient list's view, search, sort, and paging.
+
+- **Outcome tiles** (Recipients, Delivered, Bounced, Complained, Unsent) go on settling as receipts arrive, while the render and the audience stay fixed. A muted caption above them says which is which, and a phase pill reads **Settling**, then **Complete**.
+- **A reconciliation line** accounts for every recipient by name: delivered, awaiting a receipt, skipped, pending (not yet handed to the provider), or in flight (handed over with no answer yet). When anything bounced or complained, it says what that does to an address: a hard bounce suppresses it, a complaint unsubscribes its reader, and a soft bounce is counted and leaves it on the list. It is where a row's outcome is explained, since the row's label carries no hover text (§11).
+- **The recipient list** opens on **All**, so it reads as the whole send, beside **Delivered** and **Failures** (bounced, complained, and unsent). What went wrong is already counted in the tiles above, and one switch narrows the list to it; any address can be searched. A bounce row says hard or soft by the kind recorded on it (SPEC §8), not by color. An erased person's row reads **Erased recipient**, muted, in place of the address (SPEC §7); the CSV keeps the row's placeholder.
+- **Keeping its place.** When a refresh moves the counts, the list reloads on the page, view, search, and sort the reader chose, keeping keyboard focus where it was. A refresh that fails leaves the list as it is and says nothing; only a load the reader started shows an error.
+
+**A canceled send** never fired, so its page is not a record: a **Canceled** pill, when it was canceled, who acted on it (§10), and that no one was mailed.
+
+### Subscribers
+
+The list as a whole (SPEC §8). The head has **Import** and **Export** (Ghost) beside **Add subscriber** (Primary); when the title and the three buttons don't fit on one line, the buttons go under the title.
+
+**The summary card** gives the composition of the whole list, and doesn't change with the filter. Each count is also a way into the list, as the dashboard's tiles are: choosing one shows its slice, exactly the rows it counts, a status (suppressed or not) or every suppressed subscriber (whatever their status), with the toolbar's controls following and any search dropped, and choosing it again shows the whole list. The chosen count is marked in the Secondary palette of a pressed toggle, since it switches what you're looking at and commits nothing, and reads as chosen only while the filter is exactly its slice.
+
+**The legend** opens under the counts from a **Legend** toggle at the card's right edge, and defines every label a row can show, each pill drawn as the list draws it beside its meaning. Its groups sit under labels in the app's label style: **Status**, the consent states; **Suppressed**, what suppressed means, that a status is greyed while a suppression keeps it from taking effect, and each flag that says why; and **What you can do**, each act in a row's menu and when it's the one to use, which says whose decision it records. The toggle already names the panel, so it has no title of its own. Its words are the ones the API reference gives a client (SPEC §7), so the publisher and Claude are told the same thing. It is part of the page, in the page's own colors, starts closed, and stays open or closed while the list reloads.
+
+**Status and suppression filter separately**, because suppression is an overlay on an address, not a consent state (SPEC §7). The Status column shows the status alone. A suppressed address carries a small red flag beside it naming why (**bounced** or **blocked**), never a value in the Status column, and its status stays there in the unsubscribed grey: still true, but not in effect while the suppression stands, so a confirmed address that bounced never reads as one that is mailed. A row's pills are plain labels (§11). A subscriber's own details, such as the provider's bounce message or why an unsubscribed person left, are on their page, below, so the legend, which defines only what a row shows, has no group for why someone left.
+
+**An empty list**, rather than a filter that matches no one, says so, links to the import in its text, and suggests sharing the subscribe page. While SES is in the sandbox (SPEC §13), a signup's confirmation reaches only addresses verified in SES, so the text instead says to share the page once AWS grants production access and ends with **Request production access**, as Settings → Email sender does. When the app can't tell, it reads as it does outside the sandbox.
+
+**While email isn't going out** (SPEC §13), a red line under the head says signups are paused because Amazon SES is refusing email, confirmations included, and links **See what to fix** to the dashboard, where the cause and the fix are. It goes once an email gets through.
+
+**How they joined** is on the subscriber's page, not the roster, never a fourth state (SPEC §7). There are only two ways in, signing up here and an import, so a column spent most of the row's width on one fact a publisher rarely scans by, and its job, checking an import, belongs to the import and to each person's page.
+
+**A row opens the subscriber's page**, as a Sent row opens its record: a click anywhere on the row, or the address, which is the row's link for the keyboard and a middle click. **Every row's menu** (⋯) sits outside that target and offers, in order, **View subscriber**, which opens the same page, **Unsubscribe** (for a pending or confirmed subscriber, since a person can ask to leave before they ever confirm), **Block** (for an address with no suppression), **Unblock** (for one the publisher blocked) or **Clear** (for a bounce), and **Erase** (for anyone not already erased), each described below. Each act records whose decision it was: an unsubscribe and an erasure are the person's, made at their request; a block is the publisher's own (SPEC §7).
+
+**The subscriber's page** (SPEC §8), at `#/subscribers/:subscriber`, under ← Subscribers, is titled with the address, its status pill and any red flag beside it, drawn as the list draws them, with the row menu's acts at the head's right, each with an ellipsis since each opens the same dialog the menu does: the destructive ones the subtle Danger, Unblock Ghost. Under the head, one muted line in the record's meta-line place answers whether they receive posts, in the server's verdict: "Receives your posts.", with a small green dot, or "Not sent your posts:" and every reason, from the status and the suppression ("they haven't confirmed", "they left the list on [date]", "the address bounced", "the address is blocked"). After an act lands the page reads itself again in place, keeping what it showed until the answer arrives, and puts focus on the title, since the button that opened the dialog may be gone (§11). Below, each part sits under the record's small uppercase label: How they joined, Suppression, and Why they left each in a card, and Sends as its table alone, with the label on the page above it as the dashboard's sections have, since a table is already drawn as a card and one inside another reads as a frame within a frame:
+
+- **How they joined**: the way in, keyed on the import that brought them, not on what the file claimed: "Imported · Sendy, single opt-in" for anyone an import brought, with the origin as the service spells its name and "opt-in unknown" when the file didn't say, "Double opt-in" only for a confirmation Lettre recorded itself, and for someone who signed up here and hasn't confirmed, that they haven't; for an import, the origin and opt-in its file gave, then the import: its file's name, when and by whom (the publisher's address, with the client when it wasn't the editor, §10, or "a service token"), and the attestation's version; when they joined (the same date as the roster's Joined column) and confirmed; and the evidence pretty-printed, or "None recorded". An import records the file's own date (its confirmation time, else its subscription time) as the confirmation, so for an imported subscriber a line says the origin, opt-in, confirmation date, and evidence are the file's account, not something Lettre recorded. An erased subscriber has no such card, since nothing of it is kept.
+- **Suppression**: the flag, drawn as the list draws it, and since when, what the flag means for this address, naming whose it was where the record can tell (a bounce here is the email provider's, an imported one the previous service's, a block on someone who joined here the publisher's) and in the legend's words where it can't (a block on someone imported or erased may have come with the import), and the provider's or publisher's words as Detail. With none it says "None.": whether they are mailed is the line under the head. It is the suppression as it stands, not a history: past bounces show per send below.
+- **Why they left**, for someone who has left: when they left, then why in the words the API reference gives each reason (`unsubscribe_cause`); for a complaint, a link to the send the report was about, when it is among the sends shown; for someone who has signed up again since, the card is titled **Left before** and says why in the past tense, then that they signed up again and haven't confirmed, since the shared meanings describe someone still gone. An erased subscriber's page says here only that they were erased and when.
+- **Sends**: every send the address was in, newest first, as a table: the subject, linking to its record, over when it fired; the outcome in the record's words and swatch (Delivered, Hard or Soft bounce, Complained, Accepted, Unsent, Skipped); the detail (the provider's words, or for a skipped row that it was left out because they were unsubscribed or suppressed by then); and when the provider reported it. **Show more** (Ghost) adds the next page under it. With none it says they haven't been in a send yet, or, for an erased subscriber, that their past sends show an erased recipient in place of the address.
+
+**Add subscriber** starts double opt-in and says so. Its act is **Send confirmation**, not "Add", because no one joins the audience until they confirm (I1). For an address that left by a complaint or an erasure, the server refuses and nothing is sent, and the dialog stays open with the refusal's words above its buttons, which say to ask the person to subscribe through the subscribe page: only their own sign-up brings them back (SPEC §7), so the dialog offers no way past it. **Unsubscribe**, from a pending or confirmed subscriber's row menu, is for the person's own request, and its dialog says so: they stop receiving posts at once (I2) and can rejoin by subscribing again, and stopping mail on the publisher's own judgment is a block instead. It is confirmed with a Danger button.
+
+**Block** is the publisher's own decision to stop mailing an address, confirmed in a dialog with a Danger **Block** that says it stops all mail whatever the person's status, which it keeps, that a person who asked to leave is unsubscribed instead, and that it can be undone. **Unblock** appears only on a block by hand, the publisher's or one an import brought, never on a bounce; its dialog, with a Primary **Unblock**, says whether the person will be mailed again, which they will only if confirmed. **Clear** appears only on a bounce, here or one an import brought, and is the weightier way back: the verdict it lifts was the provider's or the previous service's, not the publisher's. It is confirmed in a dialog with a Danger **Clear**, never a toggle, that says mail will go to an address that failed, and whether the person will be mailed again. A bounce is cleared only when the publisher knows its cause is gone. A complaint or an erasure is not a suppression but how someone left, so nothing lifts it from the menu: only the person's own sign-up brings them back (SPEC §7). Each toast names the address.
+
+**Erase** is in the row menu of every subscriber not already erased, below Unsubscribe, since anyone on the list can ask to be erased, someone who already left included (SPEC §7). It can't be undone, so it is confirmed in a dialog with a Danger **Erase** that says what it does (unsubscribes them and deletes how they joined and the evidence for it), what stays (past sends, showing an erased recipient; the address, kept only so it's never mailed), that it can't be undone, and that the person can still rejoin themselves while the publisher can't add them back. Its toast names the address, and says so when a bounce or block the address already had still stands. The erased person stays on the list, unsubscribed, with nothing of how they joined; their page says they were erased.
+
+**Import** opens Import subscribers, below.
+
+**Export** downloads the whole list as one CSV in the import format (SPEC §7), named for the day the export began. It reads every page of the export before saving anything and writes them with the same writer the server documents, so the file is the one the API's pages make, whatever the list's size. The button reads "Exporting…" until the file is saved. Nothing is confirmed, since nothing changes; a failure is a toast in the server's words, and no partial file is saved. An export finishes and saves its file even if you leave the page while it reads.
+
+### Import subscribers
+
+Bringing a list in (SPEC §7) at `#/subscribers/import`, under Subscribers in the navigation. It should feel obviously safe: see what Lettre expects, see exactly what will happen, attest, commit, and get a report. The page decides nothing: the format, the limit, every outcome and count, the attestation, the sends that would grow, and the advice to move to Workers Paid are the server's, shown as they arrive (§1.2). The head is ← Subscribers, the title, and one line: "Nothing changes until you review what will happen and confirm." The rest is one of three states, in place.
+
+**1. Before a file.** The shape comes first, so a publisher sees what Lettre reads before being asked for anything.
+
+- **The file Lettre reads**, a card with a **Full list | Plain list** toggle (the Settings toggle, §7). Full list shows a three-row sample of the five columns that decide a row (`email`, `status`, `opt_in`, `origin`, `subscribed_at`), a line naming the optional columns, **Download example file (CSV)** (Ghost), and **Import format reference →** into the Docs tab, the one place every column is described, so the screen never holds a second copy to drift from it. Plain list shows a `.txt` sample, says the next step asks what the addresses are, and offers **Download example file (.txt)**. Both example files are the server's, under its names (`lettre-import-example.csv` and `.txt`), named as examples so a downloaded one isn't taken for an exported list.
+- **Just ask Claude**, a card saying Claude converts another service's export and checks it with the publisher, with a prompt to copy.
+- **The drop zone**, dashed, with **Choose file**, the view's one Primary, and "CSV or .txt, up to N rows", N being this deployment's limit, followed by the server's reason when it is below the format's own.
+
+A file the server refuses (not in the format, a value it doesn't take, too many rows) is field validation under the chooser (§5), in the server's words, with the same prompt for Claude beneath. Nothing is guessed, and the chooser keeps focus.
+
+**2. A file chosen.** Planning writes nothing, so it runs as soon as a file is chosen or dropped; there is no Plan button. The chooser reads "Reading…" meanwhile, and once the plan is in, focus moves to the file row. One screen then holds the plan and the confirmation:
+
+- **The file row**: name, which kind of file, rows and distinct addresses, and **Replace file** (Ghost), which opens the picker again and plans the new file from the start: its boxes unticked, and a plain list's answer back to Subscribed.
+- **For a plain list**, "These addresses are **Subscribed | Unsubscribed | Bounced**", which plans again when changed, and a line that how they joined is recorded as unknown.
+- **What will happen**: one line per outcome with a count, in reading order (who joins, who leaves, what else the file does, what it leaves out), the first confirming line carrying its breakdown by opt-in and origin. Addresses suppressed here and readers this list keeps as they are (unsubscribed here, or confirmed here after the file says they left) sit apart under "Kept as they are here", so nobody reads them as imported. Someone on the list the file erases has a line of their own after those it unsubscribes ("1 subscriber here erased, as the file says: …"), never folded into them, since an erasure can't be undone. A row that also adds a suppression is said once beneath, not counted twice. **Download the N rows not imported as subscribed (CSV)** (Ghost) gives each row's number, address, and outcome. The plan's advice to move to Workers Paid, when it has one, is the list notice's amber box (§4), in the plan's words.
+- **Confirm**: a box per scheduled send that would grow ("“Owls”, sending Oct 14, 9:00 AM, goes to 25 more people."), then the attestation in the plan's words, both unticked, and under it "Only import people who asked to receive [publication]. If you’re unsure about some, take them out of the file before importing.", naming the publication as the plan's attestation does When nobody is imported as subscribed there's nothing to attest, and the card says so. Then Cancel (back to Subscribers) and **Import** (Primary).
+
+Import stays enabled. Pressing it with a box unticked marks that box with why it's needed and moves focus there, the first missing one down the page, as Schedule does with an empty subject (§3, Editor). If the commit comes back `plan_stale` (another import landed, or the scheduled posts it would grow changed), the page plans the file again, shows the new plan with its boxes unticked, and says above the actions, with focus there: "Your list or its scheduled posts changed since this plan, so here is the plan again as things stand now. Review it, then import." The commit always sends the plan on screen and the file it was made from, and Import is unavailable while a plain list's new answer is being planned. Any other refusal of the commit goes above the actions too, in the server's words, like a dialog error (§5). The file stays only in the page: nothing is stored between the plan and the commit.
+
+**3. Done.** The page shows the result and moves focus to its heading: what happened, per outcome as applied; any rows that turned out differently from the plan on screen, with what was planned and what was applied, in words (the commit plans again and its own `differed` covers only the commit itself, so the page also compares the rows of the plan it showed with the result's, which together name every row not imported as subscribed); "Nobody was emailed. To tell your readers about the move, write a post as usual."; and the import's record (the file, a fingerprint of it, when and by whom, and the attestation as given). **See your subscribers** is the Primary, beside **Import another file** (Ghost), which goes back to the chooser with focus on Choose file. The line that nothing changes yet goes, since something has. A commit repeated after a lost answer says it was already done and that nothing was written again.
+
+### Template
+
+The one email template every post is sent in (SPEC §9). The head carries the **in-use chip** ("In use by 2 scheduled posts", or a neutral chip when nothing is scheduled), as does the template section in Settings. While a scheduled post is about to send, a save is refused until it has, so the lede under the title says when it sends and that you can save once it has (with several, how many and when the last one sends), and drops the sentence once that time passes; the chip itself carries no hover text (§11). Then:
+
+- **Sample email**: the template filled with sample values in the browser, with a 640 / 375 width toggle and **Send test email** (Secondary). The sample proves the layout, not the render, so its caption points to the test. A test always sends the saved template, so with unsaved edits the test dialog says it saves them first. A test that misses some addresses keeps the dialog open with only those in its field and names them, as the post's test does, so sending again mails no one twice.
+- **What the sample binds.** The publication's identity as it stands. A name or tagline not yet set previews as a sample value so the layout reads, but the mailing address and the logo are never stood in for: with none set, the sample shows neither, exactly as the email will, since a stand-in would approve a sign-off the email never carries. Its body is placeholder text in a dashed box labelled as where a post's Markdown renders. A template test's email can't carry the box, so the post it sends says in its own words that it is a test. The same sample appears in Settings.
+- **The template editor**, with **Start from example**, a line-number toggle, Copy, and two **Required** pills (`{{ .Post.Body }}` and `{{ .Email.UnsubscribeURL }}`) that turn green or red as the template gains or loses them.
+- **A note** stating the rule: one template serves every post; a change while posts are scheduled applies to their emails too, after you confirm; sent emails never change.
+- **Variables**: every placeholder and what it means.
+
+The page saves through the save bar (§6). A save that leaves a problem the template can live with, such as a mailing address the template doesn't print, saves with a warning under the editor, naming Settings without linking there. The mailing-address warning is followed by **When to provide a mailing address ↗**, the docs section that answers it, opening in a new tab so the editor stays as it was; the API's warning stays plain text.
+
+### Settings
+
+One page of sections, grouped by whom they serve, editable first and set-at-deploy last, so the publisher never scrolls past a fixed card to reach what they can change:
+
+| Group | Sections |
+| --- | --- |
+| The publication | Publication identity |
+| Its readers | Ways to subscribe, Confirmation email, Reader pages |
+| Its emails | Email template, Default test recipients |
+| The publisher | Notifications |
+| Set at deploy | Email sender, Instance |
+
+The groups have no headings, only a wider gap: each section's title, its **intent chip** (Editable, Preview, Copy-out, or Read-only · set at deploy), and its one-line lede already say what it is. Editable sections sit on raised cards; read-only facts sit on recessed ones. One save bar commits every editable section (§6). Rules for each section:
+
+**Publication identity.** Its note says it is "Shown in every email" and, while posts are scheduled, how many emails a save would update and that the publisher confirms first, and, while one is about to send, when it sends and that you can save once it has. The sample email beside it shows which fields the template prints, so the note doesn't list them. It carries no in-use chip, since the identity is in every email.
+
+- **Logo.** Shown square everywhere, so the upload makes it square: a picked image is cropped to its centered square and scaled in the browser, then saved at once. The tile is the preview, a toast says when edges were cropped, and Replace is the way back. A logo that isn't square (one set through the API) carries a warning under the tile until it's replaced.
+- **Mailing address.** Optional (SPEC §9), so with none saved it isn't an empty field, which would read as a missing required value. It's an **Add a mailing address** button with a hint beside it. A saved address is an open field with **Remove**, and no status line, which would be untrue under a custom template that prints the address somewhere else. While an address is set and the template doesn't print it, an amber line under the field says so, with no link to the template and no mention of removing it, since Remove sits beside it. Each of the three, the Add row's hint, the open field's only hint, and the amber line, ends with **When to provide a mailing address ↗**, the section of Name your publication, the publisher's docs page for this card, opening in a new tab so a half-edited form stays as it was. The Template page carries the same fact as a save warning, one on each side of the pair that disagrees.
+
+**Ways to subscribe** offers two ways onto the list as two bands of one card, in reading order. Each band has the same head: a title, a small glyph, and one line on what it's for.
+
+- **Share the page**: the hosted subscribe page's address as plain text, with Copy and **Open ↗**, since it's a value to copy, never a field to edit.
+- **Embed a form**: a **Styled | Plain** toggle, Styled first and pressed, since it pastes in anywhere looking like the hosted page and is the form most publishers want. Then the form as it will look on the publisher's site beside the snippet that makes it, so the publisher sees the code they copy. The preview is drawn at the snippet's own sizes, and the two variants must look as different as their snippets will: Styled wears the hosted page's look, and Plain is bare markup with the browser's own controls. The band ends in **Copy HTML** (Secondary). Too narrow for preview beside code, the preview stacks above it.
+
+**Confirmation email** (SPEC §7) is preview-first: its resting state is the rendered email, and a **Preview | Edit** toggle flips to the words-only fields. There is no style choice: the email always leads with the publication's masthead, so the publisher edits words, never a layout. Because it's words, not HTML, it edits in place rather than on a page of its own.
+
+**Reader pages** (SPEC §5) shows every page a reader can land on and sets nothing, so its chip is **Preview**. An outline lists each journey (Subscribe, Confirm, Unsubscribe, Reading) with its pages beneath; pages off the main path (an expired link, an empty archive, the subscribe page while signups aren't open yet or are paused) are marked as branches and muted. **Not open yet** and **Paused** are the instance's doing rather than a reader's misstep, and their lines say when readers get them, rather than a mark of their own, which made the outline busy. Every page shows the publication once set up, and the four Reading pages that offer signing up (Landing, Archive, and their no-posts-yet versions) show signups open, whatever this instance's are now, so a publisher mid-setup still sees what readers will get: they keep their Subscribe link and the empty landing page its form, and their lines say that while signups aren't open the real pages have no Subscribe link or form. Beside the outline, a muted line under the page's name says how a reader comes to it ("When a reader opens a confirmation link that’s too old. They can ask for a new one."), and the page's row carries the same line as its tooltip. A line per page rather than per journey keeps each to one question, how the reader got here; a journey's note had to cover every page under it and read as a list of conditions. The chosen page is framed exactly as a reader gets it, with a **Desktop | Phone** toggle, the address the reader meets it at, and "Sample · links and forms do nothing". The cue that this is a sample lives in the chrome around the page, never in it, so the app's voice never appears in the page being proofed. Narrower than 640px, the outline becomes a native select and the width toggle goes. An off-path page carries no mark in the select, since a branch glyph alone in an option reads as a stray character, and these pages' names already say what went wrong.
+
+**Email template** shows the in-use chip, a read-only sample, and **Edit template →**, which goes to the Template page. Its lede says, as the Template page's does, when a post about to send goes and that you can save once it has.
+
+**Notifications** (SPEC §8) has one field, the addresses, as a chip list with an add row like Default test recipients, so an operator can add their own beside the publisher's. Each address is checked as it's added, and the add row says when the list is full, and **Send a test notification**, a check rather than the section's purpose, so it isn't Primary. The test goes to every saved address and only those, so while the field is blank or unsaved the button is disabled with a line saying why. Beneath, the deploy-time channel shows read-only: how notifications are sent, their From, and the **last notification**, as a "Delivered" or "Not delivered" pill with the channel's own words, led by the address it didn't reach when there are several. A test that reaches some addresses and not others is "Not delivered" for the ones it missed. A failed channel is a standing state, not an event, so it stays in its row until a later notification gets through, and is never a toast. When the channel is the newsletter's own provider, the section's note names the one notification it can't carry: the provider refusing the account.
+
+**Email sender** and **Instance** reflect deploy configuration read-only (§1.7), with the guide that changes them. While a local server simulates a provider (SPEC §10), the provider row carries a neutral pill naming it ("Simulating Amazon SES"); when it also stands in for the SES account, the row shows that account's state as below, with the pill beside it. On Amazon SES, the provider row also says what the app last read of the account (SPEC §13), in three states. **Sandbox** is an amber pill, with one line under it: what the sandbox limits ("It mails only addresses verified in SES, up to 200 a day.") and **Request production access**, linking the setup guide's page of that name; while AWS reviews a request, "AWS is reviewing your request for production access"; and once AWS has replied without granting it, "AWS hasn’t granted production access yet. It has replied in AWS Support, case …: read its reply and answer there.", with **What AWS asks for**. AWS's account reads the same for a request for more information, which follows every request within seconds, as for a final refusal, so the row never says AWS denied it. **Production** is a green pill and nothing more. While the app can't tell, the row says "Amazon SES" as it always has, adding nothing, since the publisher can do nothing about it there. The one exception is an AWS key not allowed to read the account, a deploy fix like the rest of the section: one muted line says what the row would show and links the setup step that adds the permission ("To show whether SES is in the sandbox, Lettre’s AWS key needs permission to read your account.", with **Add the permission**). It explains and never warns, since sending works either way. Whether email is getting out (SPEC §13) adds to the row: while SES hasn't taken an email yet, a grey **Not proven yet** pill beside the name, and the line "SES hasn’t sent anything yet, so signups are closed." with **Send a test email**, linking the Template screen; while SES refuses the account, a red **Refusing** pill, and SES's words (or the account check's finding) with the fix, in red, ending "Then send a test email" with the same link. Once email works, no pill, and one muted line says when SES last accepted an email, in the words the setup checklist uses ("SES accepted an email Oct 29, 8:10 AM."). Neither pill is a toggle or a control: the way out is a test. A **Send rate** row under it gives the pace a send keeps to and where it comes from ("14 emails a second, up to 50,000 a day (from your SES account)", or "set by SES_MAX_SEND_RATE", or "Lettre’s default"); it explains and never warns. Each warning the server gives about the connection sits under the provider row in the server's words, ending in a link to the guide step that fixes it: red for an `error`, which means no email can go out (a configuration set that's missing or paused, a rejected key, sending turned off, an unverified sender), and amber for a `warn` (bounces that won't reach the app, an account under AWS's review). Under the From address, one muted line says where readers' replies go ("Readers’ replies go to this address. Forward it to your inbox."), linking the setup guide's step for it. The app can't tell whether the forwarding exists, so the line explains and never warns (§1.3): no amber, no state, and nothing behind it to set.
+
+### Docs and API
+
+The docs and the API reference share one room with its own bar (back to the dashboard, a Docs or API switch, and close) over a contents rail and the page. The build stamp sits at the rail's foot, and nowhere on the publication's screens: it's for a bug report, not the publisher's day.
+
+**Docs** renders two sets, one doc per page: **Publishing**, for the publisher, and **Self-hosting**, for whoever runs the instance. Each set's index sits under one header, **Lettre docs**, with one intro describing both sets and who each is for, then a tab per set: an underlined strip with the current set in the foreground over an accent rule, so it reads as something to switch. The tabs are links, since each index is its own address, and they choose what you read, never who you are. A set's own intro, written for a reader of the raw index file, isn't repeated in the app; the set's title is the tab's tooltip. `#/docs` opens on Publishing, since the Docs tab is read once Lettre runs, mostly by the publisher, and `#/docs/self-hosting` is the setup guide's index. The set stays a choice inside Docs, never a third tab in the room's bar, which chooses between kinds of document.
+
+An index lists its sections in order. Each set opens with a numbered section of steps taken in order (Publishing's Set up your publication, which follows the dashboard's first-run checklist of that name, and Self-hosting's Get started), and every other section is picked from. A doc's eyebrow names its set and links back to that set's index, so the set always sits in the one slot over the title, and the rail holds only the doc's own headings. Previous and Next stay within a section, so the main path ends at its last step.
+
+A doc's code block is a bare card: the code on the raised surface the API reference's examples use, with no label line, since the prose around it already says what it is, and Copy as its glyph alone beside the first line. A fence that names `bash`, `json`, or `jsonc` is highlighted on the same palette; one that names no language (expected output, a value to paste, a DNS record) stays plain, never guessed at. The highlighting is the editor's, over the Markdown as written, so the docs and the Markdown served to Claude carry no markup for it. Inline code in a doc's prose is maroon on a chip a shade darker than the page, so a name reads apart from the sentence and from a link's ink, and is never bold, even inside a bold lead-in. Bold in a doc is 650, the weight of its headings, lighter than the browser's 700, which reads heavy on Gabarito.
+
+**API reference** is read as a document, not looked up in a table: each route stands complete where it appears, with its prose and its examples side by side, in quiet rows, divided by hairlines rather than boxed, that a reader scans by eye. Claude reads the same reference as Markdown.
+
+- **Introduction.** Under its title, what the page is: every endpoint this instance serves, the one API the web editor and Claude both call, always matching the version it runs, and the base URL. It is the rail's first entry, which goes back to the very top.
+- **Topics.** Short topics every route shares (Authentication, Requests, Errors, Lists and paging, Acting safely), each a heading over a few plain sentences, with its own entry in the rail. What only one resource's routes share is said on those routes, as following sends is on Follow changes to sends, so the topics stay what every route needs.
+- **Errors.** In the order a reader needs them: the status ranges, a summary of every status the API answers, the error body's fields, then the few refusals any route can give and no route lists as its own, each with what it means. Unlike a route's refusals they show no next move, which their status and line already say; the Markdown keeps it, for Claude to act on. There is no table of every code: someone holding a refusal looks it up on the route that gave it.
+- **Resources and objects.** Each tier lists its routes under the resource they act on. A resource opens with the object its routes return ("The send view" under Sends), then any object one of its fields holds ("The condition object"), so the send view describes each field in a line and leaves a vocabulary to its own object. An object is laid out like a route and marked **Object** where a route shows its verb: its fields, an enum's values under its line (grouped when they fall into groups, as a halt's causes do), a section for a field whose values each say more (the condition kinds, each with its severity, fields, meaning, and remedy), and its example.
+- **A route.** Every route in full: its name, the act it performs ("Schedule a post"), as a heading; its method and path beneath, with **Copy path**, which copies the path alone, since a client takes the method as its own argument and the curl block carries the whole call; then its summary, its description, query parameters, its body (the media types in the label, then the fields, each with its type, the required ones marked), what it returns (the object, linked, and the fields the route adds), and the refusals it gives of its own, each with its code's meaning and the client's next move.
+- **Examples.** Its JSON examples and a curl command for this instance, carrying the credential its tier needs, each on a raised card with its label and **Copy** inside it, so code stands apart from the page in both themes (the import page's examples share it). On a wide screen they sit in a column beside the prose and scroll with it, since an example taller than the window, as the send view's is, would never show its end if pinned. On a narrower one they follow the prose.
+- **Sections and rows.** Each section (a route's query, body, returns, and refusals; a topic's error body, statuses, and refusals) is a small heading over a rule, then unboxed rows divided by hairlines, with no rule under the last. A field's name, type, and an amber **Required** share a line, with what it means under it, so a long name never squeezes its description; a type that names an object links to it. Refusals and statuses are a ledger led by the status, tinted by its class (4xx amber, 5xx red), so a reader scans by status. Values that each say more are rows too, their short cells beside the name and their long ones beneath, so nothing scrolls sideways. A long name breaks where its words join, never mid-word unless nothing else fits.
+- **Rhythm.** The headings step down from the page's title to the tier, the resource (over a rule), and each route, object, or topic. Nothing is pinned but the room's bar, since a pinned heading over a long page distracts. The page reads at a doc page's line height, with room above and below each route and object, so it reads one route at a time. The sizes are in the stylesheet.
+- **Prose.** Summaries, descriptions, field and refusal lines, and the topics render their inline Markdown (code, bold, links to a web address or a path on this origin, and paragraphs), with any HTML in it shown as text.
+- **Addresses.** Every part a link can name has an address: a route, named for what it does, its title's words without the articles or a possessive (`#/api-reference/cancel-send`), so a reworded title moves its link; a topic, a tier, a resource, and an object. An address opens the reference there, just under the room's bar. Every heading with an address is a link to it, in its own ink, with a link icon in the margin on hover, so a heading is how its address is copied, and there is no separate Copy link. The rail's links and a route's Returns link are real links, so they open in a new tab or copy as any link does; a plain click jumps in place, puts the address in the bar, and moves focus to the heading, so the keyboard and a screen reader carry on from there.
+- **Filter.** A filter above the first tier narrows the whole page, rail included, and `/` focuses it. It finds a route by its name, method, path, or summary, by a refusal code it gives (pasted from a response), by the object it returns, or by a real URL with its parameters filled in, and a topic by its title (Errors also by a refusal any route can give). When nothing matches, the page says so and links the Introduction, which clears it.
+- **Rail.** The page's contents: the topics, each tier, its resources, and, under the resource the reader is in, its object and routes, so it stays short enough to move by. While the filter narrows the page it lists every route that matches. On a phone it is the tier chips alone. As the reader scrolls, it lights the heading they are in and the address bar follows with no history entry, so the address is a link to what is on screen and Back still leaves the reference. Only scrolling moves it: the address a page was opened with stays until the reader moves.
+
+---
+
+## 4. Sends across the app
+
+A send appears on several screens at once: the dashboard, Sent, Drafts, the editor, and its own page. This section says how all of them stay consistent.
+
+### One send, one truth
+
+Every page that shows a send follows it through one shared read of the send feed (the send-state layer), which reports every send that changed, whoever changed it, and says when to look again (SPEC §8). No page keeps a poll of its own. So a send never reads one way on the dashboard and another on its own page, and no page needs a reload to catch up.
+
+1. **Every change shows, whoever made it.** Claude's cancel, a move, or a re-make shows on the next read. How often to read is the server's answer, not the page's; a countdown ticks on the page's clock between reads.
+2. **A send's home moves with it**: the editor while it's scheduled or due, its send page from the moment it starts. The editor hands off on the read that sees the start, with a toast saying why. Nothing else moves the reader.
+3. **Say what is true.** "Preparing to send…", never "Sending now", from the fire time until the sweep starts the send. Missed only past the server's tolerance. Settling while receipts arrive, then Complete.
+4. **Problems stay in view until they clear**, wherever the send shows.
+5. **Background reads are quiet.** A hidden tab reads nothing and reads at once when shown again. A background read that fails is retried, spaced out, and says nothing; only a read the reader started shows an error. A page that has just acted asks for a read at once, so everything catches up with the act. When the server says the database is behind what the page last saw (a local reset, or a restore), each page reads its own list or send again, as if just opened.
+
+What each screen shows at each stage:
+
+| Stage | Dashboard | Sent | Drafts | Editor | Send page |
+| --- | --- | --- | --- | --- | --- |
+| **Scheduled** | Link-only card with a countdown | Card with Edit schedule, Cancel, and a countdown | Row reads scheduled | Scheduled banner with a countdown, Edit schedule, and Cancel | Opens the editor |
+| **Due** (fire time passed, not yet started) | Card reads "Preparing to send…" | Same card, without Edit schedule and Cancel | Row reads scheduled | Banner reads "Preparing to send…", its controls disabled in place | Opens the editor |
+| **Sending** | Active-send card | In progress card | Row reads sending, opens the watch | Never shown: hands off to the watch | The watch |
+| **Needs attention**, or in flight too long | Health line | Attention card, or a note on its In progress card | As sending | As sending | Alert at the top; Resolve for a wedged send |
+| **Settling** | Row in Sent, Delivered follows the counts | Same | Gone | Never shown | The record, Settling |
+| **Complete** | Row with its final Delivered | Same | Gone | Never shown | The record, Complete |
+| **Canceled** | Card leaves the queue | Same | Row reads draft again | Banner goes, post editable again | Canceled page |
+
+### The review window
+
+**The scheduled banner** (editor) and **the scheduled card** (Sent) are where a schedule is managed. Both carry **Edit schedule** and **Cancel** as equal-weight Ghost buttons: both act on the pending send without editing its content, and neither is the view's Primary. The dashboard's card is link-only.
+
+- **The countdown** says "Sends in …", coarsening with distance: seconds in the last five minutes, then minutes, hours, and whole days.
+- **At the fire time**, on the page's own clock, the countdown becomes "Preparing to send…" and the window controls go: the card hides them, and the banner disables them in place, since the page hands off within seconds. A later read that still offers them doesn't bring them back. "Sending" is only ever said of a send that is.
+- **Past the server's tolerance**, both read "Missed its fire time · N min late" in red.
+- **Cancel** acts at once, with no confirmation, because a cancel is fully reversible: schedule again. A Cancel that loses the race with the fire time says so plainly: the send time has passed, so the email is going out.
+- **Edit schedule** opens the Schedule dialog again, titled "Edit schedule" and without Send now: the time, then the post's settings, with **Cancel** and **Save**. Save applies whatever changed, the time, the settings, or both, so its label never changes as you edit; the toast says what happened, "Rescheduled" when the time moved and "Saved" when only the settings did. Each goes through its own route, the settings first, so a refused address shows under its field and moves nothing; if the time then can't move (the send has just fired), the dialog closes saying the settings were saved and the send time didn't change. Only a moved time is checked against the lead, so the settings alone can be saved up to the fire time. Not plain "Edit", which beside the locked post (its foot says "Cancel the schedule to edit") would promise what it can't do. The content stays frozen and the window is kept. Its control stays live even when no provider is connected, since moving a send sends nothing.
+- **Where the post is going.** The editor's banner has two rows. The top one holds the time, who last acted on the send when it wasn't you in the editor (§10), the notes that change what happens to the send (held, re-made since its last test, daily writes), and Edit schedule and Cancel, which act on the schedule. Under a hairline, on a shade deeper of the same violet and led by an icon in the same violet (a link for the archive, an envelope for email only), the bottom row says what the send will do: "Sends by email and publishes at `newsletter.example.com/archive/spring-update`", led by the link icon, or "Sends by email only", led by the envelope. It names both acts, so it says everything that will happen, and takes the top row's own verb and tense ("Sends in 2 days"), present for what is still to come, so the two rows read as one. Not the past tense ("Sent to email…"), which a first-time reader takes as already done whatever the time above says. The address is shown because this is the last look at it before it is fixed. It is said once, so the top row carries no tag and the head no Email only label. Only this banner, on the post's own page, says it in full; a scheduled card under Sent or on the Dashboard is an item in a list, and marks only the exception after the time: "Email only".
+
+### A send the database may not cover
+
+Workers Free suits a list of up to about 1,000 subscribers; past about 5,000, one send can use up the day's database writes (SPEC §8). On the Workers Free plan's limits, the app says so in two places, each in the server's words, and neither disables a control: a standing notice on a list past 1,000, and a warning on a send to more than 5,000, the server's `daily_writes` condition.
+
+- **The Schedule dialog**, and its Send now view, show it as an amber box under the hint, the not-connected line's look, once the audience is read and found over the threshold. Schedule and Send now stay live: the account may be on Workers Paid, and the review window is where the publisher decides. The dialog reads the audience only on Free's limits, and only once for both views. It judges by the audience alone, as the server does, so the dialog and the banner never disagree.
+- **The scheduled banner** carries the same words as a line under the countdown, for as long as the send is scheduled. The line keeps the banner's own violet, led by an amber ⚠️: a warning that blocks nothing shouldn't outweigh the send it's about, and the mark says it's worth a look without coloring the words.
+- **The list notice** sits under the subscriber count: on the Dashboard under its tiles, on the Subscribers screen inside the summary card under the counts and above the legend, and on an import's plan when the import would take the list past 1,000. It is the same amber box, and it stays for as long as the list is past 1,000 on Free's limits. Lettre judges the plan from its config, so its words also cover an account already on Paid whose budget was never raised.
+- **Nowhere else.** Neither is an attention item: nothing is wrong yet, and the health block is for what needs a person now (§1.3).
+
+### A send in the sandbox
+
+While SES is in the sandbox, a send reaches only addresses verified in SES and waits for the rest (SPEC §6). Scheduling it is allowed and warned about, in the server's `sandbox` words, the way `daily_writes` is: an amber box under the hint in the Schedule dialog and its Send now view, once the provider is read, and a line on the scheduled banner, in its violet led by an amber ⚠️, for as long as the send is scheduled. Neither disables a control, and neither is an attention item: the dashboard's sandbox line already says the account is in the sandbox.
+
+### Re-making scheduled emails
+
+A change to the template, or to an identity field the template shows, while posts are scheduled re-makes their emails (SPEC §8). The server refuses the save until the publisher acknowledges it, and the UI reacts to that refusal; it never decides which fields count.
+
+- **The confirmation** is a dialog: one sentence on what the save reaches, the sends by subject and fire time, and three facts in a label column (what changes: the look; what stays: the content and fire time; what's next: a fresh test), so the consequence is scanned rather than read. The alternative, a second template, is named in muted text as not yet offered. Its Primary is "Save and apply". Declining leaves the edits unsaved.
+- **A save refused because a send is about to fire** shows where that surface's errors live (the save bar, or under the logo), naming when to try again.
+- **Afterwards**, the toast says how many emails changed and that each needs a test again. Then each re-made send carries the server's `remade` condition until a test of the new copy is sent: the condition's own line in the post's scheduled banner, which says the template or publication details changed the email's look, that its content and send time are the same, and to send a new test, with no button of its own since Send test email is in the actions bar below; and a "Look changed since your last test" mark on the dashboard's scheduled card. It is the same fact Claude reads, so it can't be dismissed without testing; it goes when the test lands. The Sent queue's card carries no mark, since the editor is where the test is.
+
+A scheduled send no test has been sent for carries the server's `untested` condition, an `info`, said quietly as SPEC §8 asks: "Not tested yet", muted, beside Send test email in the actions bar, the control that settles it, until the first test lands. It is a label for the condition, not its message, and it is not in the banner, which keeps the notes that change what happens to the send. It shows nowhere else, not on the dashboard's or the Sent queue's cards and not in the health block, since nothing is wrong (§1.3).
+
+### Attention
+
+The **health block** on the dashboard, the **attention cards** on Sent, and an **alert** at the top of the watch carry the conditions the server reports as needing a person (§1.3). They are repainted from every read, in the server's words, and leave only when the condition clears. Red is for a condition someone must act on, amber for one to keep an eye on:
+
+| Condition | Tone | Where, and what it offers |
+| --- | --- | --- |
+| Missed fire time | red | Health line; the scheduled card and banner read "Missed its fire time · N min late". |
+| Wedged send | red | Health line linking to the send; attention card and the watch carry **Resolve…**. |
+| Provider refusing the account, or this send | red | Health line, attention card, and watch alert, each with the provider's words and one sentence of advice that names the fix and who makes it. No control: nothing in the app fixes it, so the subject links to its watch. The watch's headline says "refusing this account", or "refusing this send" when the provider refuses the send's own email. The copy says no one has been marked unsent because of this, so it stays true beside readers unsent earlier, and the send resumes once it is fixed, and the watch names the next retry. |
+| In flight too long | amber | Health line, a note on its active-send and In progress cards, and a line at the top of its watch. |
+| Rate limit the deployment causes | amber | Health line and a line at the top of its watch, in the server's words, which name `SES_MAX_SEND_RATE`. An ordinary outage or rate limit raises nothing (below). |
+| Bounce spike | amber | Health line linking to the send's record. |
+| No receipts | amber | Health line linking to the send's record (one line for several sends, linking to Sent), and a line above the record's tiles that goes when a receipt lands. |
+| No provider connected | amber, or red once it holds a send | Below. |
+| SES still in the sandbox | amber | Health line, "Amazon SES is still in the sandbox, so it mails only addresses verified in SES", with **Request production access**. Left out while the setup card's step of that name says it (§3). |
+| Email not going out | red | Health line, "Email isn’t going out, and signups are paused.", then SES's words (or the account check's finding), the fix, and "Then send a test email: once SES takes one, signups reopen.", linking the Template screen. It stands for the connection warnings that are errors, which say the same cause, so they aren't shown twice while it lasts. Subscribers carries a red line of its own (§3). Below. |
+| A notification that didn't arrive | amber | Health line, "Lettre’s last notification didn’t arrive:", the channel's words, and "Check Settings → Notifications.", linking Settings, while the last try failed with none delivered since. The setup steps' **Get notified** points up at it (§3). |
+| A warning about the provider's connection | red for an `error`, amber for a `warn` | Health line in the server's words, linking the guide step that fixes it. Red: a configuration set that's missing or paused, a key SES rejects, sending turned off, or a sender that isn't verified, each of which stops every email. Amber: bounces and complaints that won't reach the app, or an account under AWS's review. Never holds a send. |
+
+A send that needs the operator leaves the active-send cards and In progress, so it is reported once. A provider that is only unavailable is not an attention item: the send reads as in progress, its phase gloss says the provider is unavailable and when the next retry is, and the in-flight-too-long flag raises it if it lasts.
+
+**Resolve** explains why the send can't finish on its own and offers **Assume not sent** and **Assume sent**, with Cancel. Neither choice re-mails anyone (I4), so the dialog explains a trade-off in the record's accuracy, not a danger. Since the app can't tell whether those emails went out, the dialog names **Assume not sent** as the safe default and **Assume sent** as the choice for when the operator knows otherwise.
+
+### No email provider
+
+Two states have no real provider (SPEC §9, §13), and each is worded for who meets it.
+
+**Local development** (and the tests, and a hosted demo) sends through a stand-in that records a send but delivers nothing. A confirmation like "Test sent to 2 addresses" would read exactly like a real send, so send-action toasts end with "(local stand-in: nothing is delivered)", and the Sent page carries a muted line saying the same. The copy never says "fake transport".
+
+**A deployment partway through setup is not connected.** It refuses every send, so there's nothing to confirm; the operator needs the way out. Every mention names the state ("No email provider connected"), says what it stops, and links **Connect Amazon SES** to the guide. It is a standing state, true every time the reader looks, so it is never dismissible. It shows wherever a send would be refused, before the publisher tries:
+
+- **Dashboard and Sent**: an amber line, a standing state with no send behind it. While setup is open, its Connect Amazon SES step says it instead, and the steps that send say they come after it (§3).
+- **A draft's page**: the same amber line above the actions, "No email provider connected: you can write and preview, not send", so the publisher knows before opening a dialog.
+- **A scheduled send**: the dashboard's card and the editor's banner keep their countdown, since the window is real and still cancelable, and add "Will be held: no email provider is connected." On the white card the line is amber. On the banner it is a line under the countdown like the daily-writes one, in the banner's own violet led by an amber ⚠️, since amber words on violet are hard to read and would mix two of the color meanings. It keeps a heavier weight than the daily-writes line, because a held send doesn't go out.
+- **Every dialog that would send** (both test dialogs, Schedule, Add subscriber): an amber line, the act disabled, and the fields it would need left out, so there's nothing to fill in. Focus lands on Cancel.
+- **Settings**: the provider row carries the state and the link; Ways to subscribe says signups aren't open yet; Notifications reads "Your email provider, once one is connected".
+
+**A send held for want of a provider** (scheduled before the provider went, now due) is said once, together with the state, in red, since two statements of one cause read as two problems. On the dashboard it is the health block's one red line; on Sent, one attention card naming each held send. It says no one was marked unsent and the send goes out at its first retry once a provider is connected, then the fix: connect one, then deploy. In local development's preview of this state (SPEC §10) there's nothing to deploy, so the fix is to restart `bun run dev` without `SIMULATE_SENDS=not-connected`.
+
+These controls are disabled from the deployment's own description of itself, read once at boot; the server still refuses whatever gets past them, and its refusal shows as a toast in its own words. A configured deployment shows none of this, and none of it is ever part of a post's frozen record (I3).
+
+### Email not going out
+
+Once a provider is connected, whether email is getting out (SPEC §13) is a standing state with no send behind it. While SES hasn't taken an email yet, nothing is wrong: the setup card's test step and Settings' **Not proven yet** pill say it, and the health block stays quiet. While SES refuses the account, it is a red health line (Attention, above), with Subscribers' and Settings' red lines beside it. Every one of them ends in the way out, a test email: a refusal an email met lifts only when SES takes one, and one the account check found also lifts on the check's next clean reading, so the test is the quickest check either way. None is dismissible. The readers' side is the subscribe page's own: "Signups are paused. This newsletter can’t send confirmation emails right now. Please try again later.", the same for every address, with no form, which Settings → Reader pages previews as **Paused** beside **Not open yet**.
+
+---
+
+## 5. Messages: where feedback goes
+
+Every message has exactly one home, chosen by how long it lives and what the reader must do about it. A message never appears in two homes at once. Most feedback bugs are a message in the wrong home.
+
+| Home | What goes there | How long it lives |
+| --- | --- | --- |
+| **Toast** | The result of an act the reader just took, including a failure with nothing standing to fix. | About three and a half seconds. |
+| **Save bar** | An explicit-save surface's unsaved edits, and why the last save didn't go through. | While there are unsaved edits. |
+| **Save cue** | The editor's save state: Unsaved, Saving…, Saved, or why the last save failed. | Continuous; a failure stays until a save succeeds. |
+| **Banner** | A standing state of the screen's subject, with its actions: the editor's `scheduled` and `conflict` banners. | While the state holds. |
+| **Field error** | Why one field's value is refused, beneath the field, on a page or in a dialog. | Until the value changes. |
+| **Dialog error** | Why a dialog's act didn't go through, when no one field is at fault, just above its buttons. A page whose act sits at its foot, like Import, says it the same way. | Until the next try. |
+| **Attention** | A condition someone must act on (§4). | Until the condition clears. |
+| **Standing line** | Why an act is unavailable, such as no provider connected (§4). | Every time it's shown, while it's true. |
+| **Wall** | A state in which nothing in the app can work (§2). | Until reload. |
+
+**Choosing a home.**
+
+- A toast is never the only record of something that lasts. If the reader could come back later and need to know it, it belongs in a banner, attention, or the page itself.
+- **A toast carries a failure only when nothing standing is left to fix**: an act with no surface of its own (New post, a row or card action, a copy the browser refused, the save a leave makes after the page is gone). A failure with a home (a field, a dialog, the save bar, the save cue, a channel's status row) says so there and nowhere else.
+- **Errors are in the publisher's words.** The server's message stands when it was written for people; a bare code, a bare "not found", or a dropped connection is said plainly instead ("Couldn’t reach Lettre. Check your connection and try again.").
+- **A dialog says its own errors.** A toast at the foot of the screen is far from the field it's about, and gone in a few seconds while the dialog stays open. The error goes under the field at fault, which is marked invalid and focused, and clears as soon as it's edited; otherwise just above the dialog's buttons.
+- **A surface with a save bar says why a save failed in the bar**, where it stays until the next save. A toast would sit over the bar and vanish while the edits it's about are still unsaved.
+- A refusal about one field goes on that field, including a server refusal that names it (`field` on the error, `docs/API.md`): the field is marked and focused, and the save cue or save bar says "Not saved: fix the field marked above." Disabling the act instead is allowed only when the reason is visible beside it.
+- A background read that fails stays quiet (§4).
+
+**Toasts.** At most three show at once, newest nearest the bottom; a fourth sends the oldest away early. A message already showing restarts its time instead of stacking a copy, so five clicks on a button read as one. A toast may carry the one next step a success leaves, such as "Send yourself a test". Toasts sit above the save bar and above dialogs (§9).
+
+**The conflict banner.** When another writer (a second tab, or Claude) saves a newer version, the banner says who and offers **Reload** and **Keep editing** as equal-weight Ghost buttons. Both choices lose something (Reload discards local edits; Keep editing overwrites theirs), so presenting either as the safe default would be a lie about the trade-off. Saving waits on the choice, and the banner says so. Meanwhile **Save draft** reads as unavailable but stays clickable: a click, or ⌘S, saves nothing and brings the banner into view. It never means "keep editing and save", since one click would then overwrite a version the publisher hasn't seen.
+
+**A post deleted elsewhere** isn't a banner. Whatever read or write finds it gone toasts once that the post was deleted elsewhere and goes to Drafts.
+
+**No dismissible notices.** A message that the reader clears, and that the server never hears of, would let the editor and Claude disagree about what is true. The one candidate there was, a re-made send, is a condition the server already reports and settles (§4), so the app has no notice home. A new message that seems to need one is first a question for the server: is it a condition of something?
+
+**Emailed notifications aren't a home.** The notifications that tell the publisher about a send (SPEC §8) arrive in their inbox and have no echo in the app, since what they report already stands where it's managed. The one trace is the channel's own state, in Settings.
+
+---
+
+## 6. Saving
+
+Every surface that edits something saves one of two ways, and commits to it whole. Mixing them (an autosave surface that also shows a save bar, an explicit-save surface that quietly persists) is the confusion this rule exists to prevent. The question that picks one: is there a meaningful unsaved state the reader should be able to revert?
+
+**Explicit save** (Settings, the Template page). Edits accumulate against the last saved state, and the reader commits or discards them on purpose through the **save bar**, which slides up from the bottom of the screen with **Discard** and **Save changes** while there are unsaved edits, and away once they're saved, with a toast saying so. If a save doesn't go through, the bar says why (§5). The logo is the one exception: it saves the moment it's picked, so whatever kept it from saving shows under its tile.
+
+**Autosave** (the post editor). The draft saves as you type, after a short pause and never more than half a minute late, with the **save cue** beside Save draft. Save draft and ⌘S save at once. A save that fails turns the cue red, "Not saved:" and the reason, which stays until a save succeeds. After a dropped connection, a server error, or a 429, the editor tries again on its own, a little further apart each time, so it recovers without another edit. Any other refusal the server would repeat isn't retried: it stays on the cue until the next edit or Save draft. A conflict (409) opens the conflict banner instead, and a post deleted elsewhere (404) shows that it was deleted. Its Unsaved reads in the same amber as the save bar, so the two models feel like one app, and the state is in its words, never the dot's color alone. The editor needs continuous saving and conflict handling the save bar has no words for, so it never uses the bar.
+
+**Read-only** surfaces pick neither, because there's nothing to save. The send page is the example: the record is frozen (I3), and the watch only observes.
+
+**A save that reaches scheduled emails** confirms first, the same way on every surface (§4).
+
+---
+
+## 7. Buttons and controls
+
+Every button plays one of five roles, chosen by importance and consequence, not by where it sits. Each role is one class.
+
+| Role | Use it for | Looks |
+| --- | --- | --- |
+| **Primary** | The one act the reader came to this view to do. **One per view**, and one per dialog. | Solid accent fill. |
+| **Secondary** | An important standing act that isn't *the* act: Send test email, Copy HTML. | Soft accent fill, accent text. |
+| **Ghost** | Anything quiet: back, Cancel, Edit schedule, a menu trigger, a pager. The default. A plain `button` reads as Ghost. | Neutral, bordered or bare. |
+| **Danger** | A destructive act. Solid only as the confirming button of a dialog; the subtle variant everywhere else, neutral until hovered, so it never shouts over its row. | Red. |
+| **Icon** | A square control where a label would be noise: ⋯, dismiss, close. Always has an `aria-label`. | Ghost, square. |
+
+The roles differ by fill, border, and weight, **never by height**: every labelled role shares one height, so a row that mixes them lines up.
+
+**Rules.**
+
+- If two acts both feel Primary, one of them is Secondary.
+- A destructive act is confirmed in a dialog whose text says what is lost and whether it can be undone. A reversible act (Cancel a schedule, Edit schedule) is not confirmed, unless it stops or resumes mail to a person (Block, Unblock), or changes who can find a published post (Remove from archive…, which breaks links people shared, and Add to archive…, which puts it in front of the public), which is confirmed in a dialog that says so.
+- An unavailable control is either `disabled`, with its reason shown beside it (a not-connected dialog's act, a test with no saved address), or unavailable but still clickable (`aria-disabled`), when the click itself should point at the way out, like Save draft under the conflict banner or the locked composer's toolbar.
+- In a label, **→** navigates within the app, **↗** opens a new tab (and says so to a screen reader), and **…** opens a dialog that asks more.
+- If a new button doesn't fit a role, reconsider the button before adding a role.
+
+**Controls outside the five roles, on purpose:**
+
+- **Toggles and tabs** (**Edit | Preview**, **Styled | Plain**, **Desktop | Phone**, **All | Delivered | Failures**, **Full list | Plain list**) switch what you're looking at; they never commit an act. A plain list's **Subscribed | Unsubscribed | Bounced** is one too: it changes what the plan shows, and planning writes nothing. So are the Subscribers summary's counts, each choosing its slice of the list. The small pill toggles mark the pressed segment in the Secondary palette, and a section's main toggle is a step more prominent than one that only changes a preview's width.
+- **The text link** (`linkbtn`) is an act styled as a link, for a choice that must read as clearly demoted below even Ghost: Send now → in the Schedule dialog. Use a real role anywhere a demotion isn't the point.
+- **Copy** is a utility on a value, not an act on the publication: the word and a glyph that turns to a check for a moment when the copy lands. It says it worked where it sits, never with a toast, unless the browser refuses the clipboard. A doc's code block carries it as the glyph alone, beside the code, since a label line would only repeat the prose.
+- **Mockups** of reader controls (the embeddable form's Subscribe button) are inert and unfocusable, filled with the reader's ink rather than any role's color, because they show the reader's chrome rather than offer an act.
+
+---
+
+## 8. Color
+
+The workspace follows LetRetro's warm monochrome design: square-edged containers and controls, subtle borders, ink-filled primary actions, Gabarito for interface text and headings, and JetBrains Mono for technical text and metadata. Icons use Phosphor; the Lettre mark identifies the app. Fonts and icons are bundled locally. Circular status indicators retain their shape; email previews keep the appearance of the actual email.
+
+The sidebar offers a light/dark switch. Before a choice is saved, the workspace follows the system preference; afterward it restores the browser's choice. Both palettes preserve the same neutral visual hierarchy. Reader pages and email templates retain their publication-specific styling.
+
+A color means one thing, and a token names one color. A second token for a color that already has one is how the interface drifts. Every token has a light and a dark value; `bun run test` checks that every token used is declared and every color has both.
+
+| Hue | Means | Where |
+| --- | --- | --- |
+| **Accent** (neutral ink) | The act | Primary and Secondary buttons, links, the Editable chip, and the publisher-only strip. The publication's reader theme does not change it. |
+| **Violet** | Scheduled, in its review window | The scheduled badge, cards, banner, and the in-use chip. Off the accent so a scheduled send never reads as the thing to click. |
+| **Sending blue** | In flight | The sending badge, the dispatch bar, active-send cards, the Sending and Settling pills. Its own shade, not the accent. |
+| **Green** | Done and fine | Sent, confirmed, delivered, Complete, Saved. |
+| **Amber** | Worth a look | In flight too long, a bounce spike, no receipts, not connected, Unsaved, a pending subscriber, retrying, render warnings, the conflict banner. |
+| **Red** | Went wrong, or needs a decision | A missed fire time, a wedged send, a refusing provider, complaints, suppression, destructive acts, a refused save. |
+| **Grey** | Inert, or a fact about where something lives | Draft, unsubscribed, unsent, skipped, canceled; Read-only · set at deploy; Email only. |
+| **Ink** | Strong text and primary actions | Headings, strong labels, the active navigation item, and primary button fills. |
+
+**Lifecycle hues are facts, not verdicts.** Draft grey, scheduled violet, sending blue, and sent green are kept apart from the feedback scales: a scheduled badge is neither good nor bad. A state borrows a feedback hue only when it really carries that reading. A pending subscriber is waiting on the reader, so it takes amber, never sending blue, which would read as a send in flight. A suppressed address takes red, and its consent state the grey of unsubscribed: a subscriber's grey means not mailed, and the label still names the state.
+
+**Delivery outcomes are verdicts.** On the record, delivered is green, bounced amber, and complained red, sitting beside the lifecycle `sent` badge; the two scales together are why they mustn't be conflated. Each recipient row uses the same swatch as its tile, plus sending blue for accepted-not-yet-confirmed and grey for unsent or skipped. The send lists compress the same outcomes to a **Delivered** count, with any complaints, bounces, or unsent named beneath it in words, worst first. A clean send prints nothing there.
+
+**Code palettes borrow no meaning.** Syntax highlighting (in both editors) and the API reference's method badges are self-contained palettes: GET isn't a success and DELETE isn't an error.
+
+**Never by color alone.** Every badge, pill, swatch, and dot sits beside a word.
+
+---
+
+## 9. Layout
+
+**Stacking** is one ladder, and every fixed or floating surface takes a rung by token, never a bare number: page content, then sticky headers and the sidebar, menus, the save bar, modals, and toasts on top. A menu opens over the page; a modal covers the page; a toast sits above everything, so one raised while a dialog is open (an autosave that failed, a send that started) is never dimmed beneath its backdrop. A dialog still says its own errors inside it (§5), since a toast at the foot of the screen is far from the field it would be about.
+
+**Narrow screens.** The editor gets opened on a phone, often just to check a post went out, so every screen holds at any width, and a list never makes you scroll sideways to read its lead column. At phone width, a list table stacks: each row becomes its lead cell (subject, email) on its own line, with the rest as one muted line and the row's ⋯ at top right; column headers drop, search and filters stay. It's the desktop table's own markup restyled, not a second render, so the two can't drift. Subscribers stacks sooner, whenever its own width leaves the email less than about 250px beside its two other columns, so the sidebar's width counts and a mid-sized window gets the stacked rows rather than a squeezed address; an address that has to wrap breaks before its @. The per-recipient table on the record and the Sends table on a subscriber's page are the holdouts, and scroll sideways within their own frame instead.
+
+The docs room's bar stays one row at every width, so its anchors always clear it. On a phone, a doc's contents fold to one row that closes once a section is picked, the API rail becomes a chip row, and the build stamp moves to the foot of the page.
+
+---
+
+## 10. Copy and voice
+
+**Who speaks.** The UI speaks to the publisher as "you", and calls itself "Lettre" when it has to. Claude is "Claude", including as the author of a revision. Never "we".
+
+**Who acted.** Where the editor names who made a change (the out-of-date banner's "last edited by", an import's record, and who acted on a send), it reads the person and the client they came through (SPEC §11, Who acted): a person in the editor by their address alone (*you@example.com*), a person through Claude Code with it (*you@example.com via Claude Code*), a person through the connector Claude Desktop and claude.ai use as *Claude* (*you@example.com via Claude*), a person through another client by the name it gave (*you@example.com via my-script*), and a person whose client named nothing through the API (*you@example.com via the API*). A service token reads as one (*a service token*), by its name where the record keeps one (*the service token ci.access*), never as Claude or a person: a service token is automation, and Claude signs in as the person it works for. A send names the latest act of each kind recorded on it in one muted line, always in the same order (scheduled, rescheduled, canceled, resolved), the first word raised: "Scheduled by you@example.com via Claude Code · rescheduled by you@example.com · canceled by the service token ci.access". The send page shows it under its meta line, always, since the page is the send's record. The scheduled banner shows only the latest act, under the time, in the banner's violet ("Rescheduled by you@example.com via Claude Code", or "Scheduled by …" for a send not rescheduled since), and only when someone other than you in the editor took it: Claude Code, a script, a service token, or another person. So the line is never on a send you last scheduled or rescheduled yourself, and its presence is what marks a delegated send. A send none is recorded on, one made before who acted was, shows no line.
+
+**Use the spec's words.** A **post** is what the publisher writes; a **send** is one dispatch of it. **Delivered** always means a receipt confirmed it; a provider's acceptance is **accepted**. A delivery failure is a **bounce**, a **complaint**, or **unsent**. Consent states are **confirmed**, **pending**, and **unsubscribed**; **suppressed** is the overlay. "Consent" itself stays the spec's term, not the screen's: on a screen, say what the reader did ("agreed to receive your posts", **How they joined**), since the bare word reads as legal and can alarm a publisher who did nothing wrong. Never internal names in the UI, such as "fake transport".
+
+**Name a thing by what it is.** The Preview tab, a test, and the web version are three copies of a post, named for what each is (§3). The schedule's freeze reads as "locked" and "Cancel the schedule to edit". Where the spec says a scheduled email is *re-made*, the publisher reads that a change *applies to* scheduled emails, that they were *made again*, or that an email's *look changed*.
+
+**The server's words stand.** A condition's message, a refusal, and the provider's own words are shown as they arrive. If the words are wrong, fix them on the server, where Claude reads them too.
+
+**Say the next step.** A refusal or a lock names what to do and where: "Cancel the schedule to edit", "Add a subject before you schedule". When something changed that the publisher didn't do, say what and why: "Your send started, so this page switched to its live watch."
+
+**Be honest about time.** A send is never "now" or "immediately"; there is always a window.
+
+**Mechanics.** Sentence case for buttons and headings. Counts pluralize ("1 recipient"). A busy button says what it's doing ("Saving…") until it's done. Typographic apostrophes and quotes. A colon, a comma, or a new sentence rather than an em dash; an em dash stands alone only as the mark for an empty table cell. A date and time is short and local ("Feb 11, 2:00 AM"), and shows its year whenever that isn't the current year, past or future ("Feb 11, 2024, 2:00 AM").
+
+---
+
+## 11. Accessibility
+
+- **Focus.** One focus ring everywhere, on `:focus-visible`. A dialog keeps focus inside it, starts on the caller's chosen field or else its first control, and returns focus to whatever opened it. A wall moves focus to its heading. A menu opens with focus on its first item.
+- **Keyboard.** Escape closes a dialog or menu. A menu moves with the arrow keys, Home, and End. ⌘S saves the view where it saves; ⌘B, ⌘I, and ⌘K format in the composer. A clickable row or card always contains a real link to the same place.
+- **Names.** Every icon-only control has an `aria-label`. A ↗ link says it opens a new tab. An info tip is reachable by keyboard and touch.
+- **No hover-only meaning.** A badge or pill is a plain label with the default cursor and no hover tooltip (`title`), which keyboard, screen-reader, and touch users can't reach and some browsers don't show. What a label means is said once, in words on the page: beside it, in the section's lede, or in a legend such as the Subscribers list's or a line such as the record's reconciliation line.
+- **Live regions.** Toasts are announced politely. The conflict banner, field errors, and dialog errors are alerts, and a field's error is tied to the field so a screen reader reads it with the field.
+- **Not by color alone** (§8).
+- **Motion.** Under reduced motion, transitions and animations are off; the locked composer's pulse becomes a steady tint.
+
+---
+
+## 12. Deliberately left out
+
+Each of these was decided, not forgotten. Adding one is a design change, and most are a spec change first.
+
+- **Pausing, resuming, or ending a send in flight.** The watch is observe-only apart from Resolve (SPEC §12).
+- **An instant send.** Send now has a window (I6).
+- **Editing a scheduled post in place.** The lock guarantees that what fires is what was reviewed; editing goes through Cancel.
+- **More than one template, template history, or undo** (SPEC appendix).
+- **Open and click analytics.** The record is about delivery.
+- **A WYSIWYG editor.** The post is Markdown and the template is logic-less HTML; the toolbar inserts Markdown rather than hiding it.
+- **Editing deploy configuration** (§1.7).
+- **Server-side "seen" state and saved layout preferences.** Other controls are per browser or per load. The workspace follows the system color scheme until a theme is chosen; the choice is saved in the browser.
+- **Emailing the publisher about a bounce spike.** It shows on the dashboard only (SPEC appendix).
+- **Hover text on a label.** A label's meaning lives in words on the page, never only in a `title` on hover (§11).
+- **Unsubscribing a pending subscriber from the editor.** The API offers it; the editor's Unsubscribe is for a confirmed subscriber who asks to leave.
+
+---
+
+## 13. Changing the UI
+
+Before a UI change is done:
+
+1. **The behavior is in the spec.** If the change alters what the publisher can rely on, `docs/SPEC.md` changes first; this document only presents it.
+2. **The server decides it.** A condition, whether a control works, or a pace comes from the API. If the client would have to derive it, the API is missing a field (`docs/API.md`).
+3. **It uses the vocabulary.** Each message in its home (§5), each act in a role with one Primary per view (§7), each color by meaning (§8), each word from the spec (§10).
+4. **It works for everyone.** Both themes, keyboard and screen reader (§11), and a phone-width window with no sideways scroll (§9).
+5. **The documents move with it.** The section here that governs the change, and a `CHANGELOG.md` line for anything the publisher would notice, in the same commit.

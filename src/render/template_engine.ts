@@ -1,0 +1,518 @@
+/**
+ * The email template engine: a publisher-authored HTML layout with a `<style>` block
+ * and logic-less `{{ .Variables }}`, filled and CSS-inlined at render time (SPEC §9). One
+ * construct goes beyond a placeholder: `{{ if .IsEmail }} … {{ end }}` marks a region as
+ * email-only, which the render keeps between inert markers and the archive page omits.
+ *
+ * One token registry (`TOKENS`) is the single source of truth for every variable — the
+ * pass that fills it (`render` vs `delivery`) and how its value is escaped. Two resolvers
+ * read that registry, so "which token resolves when, and how" lives in exactly one place:
+ *  - `fillEmailTemplate` — the RENDER pass. Substitutes `{{ }}` render-phase tokens from
+ *    a fixed context (logic-less: a token is only ever replaced by a value, so nothing
+ *    executes) and freezes each delivery-phase token to an internal sentinel.
+ *  - `fillDeliveryTokens` — the DELIVERY pass. Fills those frozen sentinels per recipient
+ *    (send/test) or with generic/empty values (archive/preview): the same registry, a
+ *    later phase, instead of a separate side-channel.
+ *  - `validateEmailTemplate` reports errors (which the route rejects) and warnings —
+ *    above all, every email MUST keep an unsubscribe link, so a template without one
+ *    is an error (§7/§10, I2).
+ *  - `inlineEmailCss` inlines the `<style>` rules onto elements, because mail clients
+ *    strip/ignore `<style>` (Outlook especially); `@media` rules can't be inlined and
+ *    are kept in a `<style>` block. Backed by css-inline (WASM), initialized once.
+ *
+ * The default template ships so a fresh install sends a sensible post out of the box.
+ */
+
+import { initWasm, inline } from "@css-inline/css-inline-wasm";
+import wasmModule from "@css-inline/css-inline-wasm/index_bg.wasm";
+import { publicationName } from "../../shared/publication";
+import type { IdentityField } from "../../shared/settings";
+import type { AppSettings } from "../db/settings";
+import { publicationLogoUrl } from "../db/settings";
+import type { Config } from "../env";
+import { escapeHtmlAttr } from "../lib/html";
+import { EMAIL_ONLY_CLOSE, EMAIL_ONLY_OPEN } from "./template";
+
+// --- the token registry -----------------------------------------------------------
+// One place declares every {{ variable }} a template may use: which pass fills it and
+// how its value is escaped. The two resolvers below both read this, so nothing else
+// needs to know "which token resolves when, and how it's escaped."
+
+/** How a value is escaped into the HTML surface. `raw` inserts it verbatim — for the
+ *  already-sanitized body HTML, the logo markup (built with its own escaping), and for
+ *  the app-generated unsubscribe URL (kept raw to
+ *  preserve the pre-unification wire bytes; see that token). `attr` HTML-escapes it so a
+ *  stray `<`, `"`, or `&` can't break markup. The plain-text surface never escapes. */
+type Escaping = "raw" | "attr";
+
+/** One variable's contract. `phase` is when it's filled:
+ *  - `render`: at freeze time, from values known then (post / publication / view-in-
+ *    browser); `fillEmailTemplate` writes these into the frozen bytes.
+ *  - `delivery`: per recipient, after freezing. The frozen bytes hold an internal
+ *    `sentinel`; the send fills it with the recipient's value, and the recipient-agnostic
+ *    archive/preview surfaces fill it with a generic/empty one. Keeping these OUT of the
+ *    frozen render is what upholds I3 (recipient-agnostic bytes) and I4 (delivery is a
+ *    pure function of frozen bytes + recipient). A delivery token's `sentinel` is an
+ *    internal placeholder an author can't type in a `{{ }}` token, so authored body
+ *    content can never collide with it. */
+type TokenSpec =
+  | { phase: "render"; escaping: Escaping }
+  | { phase: "delivery"; escaping: Escaping; sentinel: string };
+
+/** Internal delivery sentinels. Not `{{ }}` (an author can't produce them) and escape-
+ *  inert, so they survive `fillEmailTemplate`'s escaping and CSS inlining untouched,
+ *  frozen into the render verbatim until the delivery pass fills them.
+ *
+ *  They carry no `{{ }}` meaning for any provider either: the fake fills them in
+ *  app before the wire, and the SES adapter turns each into a tag of its own inline template
+ *  (providers/ses_template.ts), whose value this module's delivery pass computes, so the
+ *  only constraints a sentinel must meet are the two above. */
+export const UNSUB_SENTINEL = "%%UNSUBSCRIBE_URL%%";
+export const SENTTO_SENTINEL = "%%SENT_TO%%";
+
+/** THE token registry — the one place each variable's phase + escaping is declared.
+ *  Order is cosmetic (it drives `EMAIL_TEMPLATE_VARIABLES`); resolution is keyed. */
+const TOKENS = {
+  ".Post.Body": { phase: "render", escaping: "raw" },
+  ".Post.Subject": { phase: "render", escaping: "attr" },
+  ".Publication.Name": { phase: "render", escaping: "attr" },
+  ".Publication.Tagline": { phase: "render", escaping: "attr" },
+  ".Publication.LogoURL": { phase: "render", escaping: "attr" },
+  // The whole logo `<img>`, or nothing when no logo is set (shared/email_logo.ts builds
+  // it, escaping its attributes), so a template never ships `<img src="">`.
+  ".Publication.Logo": { phase: "render", escaping: "raw" },
+  ".Publication.Address": { phase: "render", escaping: "attr" },
+  ".Email.ViewInBrowserURL": { phase: "render", escaping: "attr" },
+  // Delivery-phase (per recipient). Unsubscribe stays `raw` so the delivered bytes are
+  // byte-for-byte the pre-unification output (I5); the URL is app-generated (origin +
+  // token), not user content, so raw is safe. Routing it through `attr` would &-escape a
+  // multi-param URL — a deliberate, separately-tracked change. The sent-to address is
+  // `attr`: it lands in markup, so it's attribute-safe-escaped.
+  ".Email.UnsubscribeURL": { phase: "delivery", escaping: "raw", sentinel: UNSUB_SENTINEL },
+  ".Email.SentTo": { phase: "delivery", escaping: "attr", sentinel: SENTTO_SENTINEL },
+} as const satisfies Record<string, TokenSpec>;
+
+type TokenKey = keyof typeof TOKENS;
+type RenderKey = {
+  [K in TokenKey]: (typeof TOKENS)[K]["phase"] extends "render" ? K : never;
+}[TokenKey];
+type DeliveryKey = {
+  [K in TokenKey]: (typeof TOKENS)[K]["phase"] extends "delivery" ? K : never;
+}[TokenKey];
+
+/** The variables a template may reference (the registry keys). */
+export const EMAIL_TEMPLATE_VARIABLES = Object.keys(TOKENS) as TokenKey[];
+
+const KNOWN_VARS = new Set<string>(EMAIL_TEMPLATE_VARIABLES);
+
+/** Values the RENDER pass binds — render-phase tokens only. Delivery-phase tokens carry
+ *  no value here; `fillEmailTemplate` freezes them to their sentinels for the later pass. */
+export type RenderContext = Record<RenderKey, string>;
+
+/** Per-recipient values the DELIVERY pass binds — the delivery-phase tokens, by key. */
+export type DeliveryContext = Record<DeliveryKey, string>;
+
+/** The delivery-phase tokens, precomputed from the registry (drives `fillDeliveryTokens`). */
+const DELIVERY_TOKENS: { key: DeliveryKey; escaping: Escaping; sentinel: string }[] =
+  Object.entries(TOKENS).flatMap(([key, spec]) =>
+    spec.phase === "delivery"
+      ? [{ key: key as DeliveryKey, escaping: spec.escaping, sentinel: spec.sentinel }]
+      : [],
+  );
+
+/** The delivery-phase tokens and the sentinel each is frozen to, for a transport that fills
+ *  them itself from per-recipient data (SES's bulk send), with values from
+ *  `fillDeliveryTokens`, so the escaping stays this registry's. */
+export function deliverySentinels(): readonly { key: DeliveryKey; sentinel: string }[] {
+  return DELIVERY_TOKENS.map(({ key, sentinel }) => ({ key, sentinel }));
+}
+
+const TOKEN = /\{\{\s*([\w.]+)\s*\}\}/g;
+
+/** A region tag: `{{ if <condition> }}` (the condition in group 1) or `{{ end }}` (no
+ *  group 1). Read before placeholders, since `TOKEN` would take `{{ end }}` for one. */
+const REGION_TAG = /\{\{\s*(?:if\b\s*([^}]*?)|end)\s*\}\}/g;
+
+/** The one condition a region may take. */
+const IS_EMAIL = ".IsEmail";
+
+/** The template with its region tags turned into the inert markers. A tag validation
+ *  refuses (any other condition) renders empty, as an unknown placeholder does. */
+function markEmailOnlyRegions(html: string): string {
+  return html.replace(REGION_TAG, (_m, cond: string | undefined) => {
+    if (cond === undefined) {
+      return EMAIL_ONLY_CLOSE;
+    }
+    return cond === IS_EMAIL ? EMAIL_ONLY_OPEN : "";
+  });
+}
+
+/** RENDER pass. Mark the email-only regions, then substitute `{{ token }}` for each
+ *  render-phase token (escaped per the registry; `.Post.Body` raw) and freeze each
+ *  delivery-phase token to its sentinel, so the per-recipient pass can fill it later.
+ *  Logic-less: a token is only ever replaced by a value, and a region is kept whole in
+ *  the frozen bytes, not decided here. An unknown token renders empty (validation warns). */
+export function fillEmailTemplate(html: string, ctx: RenderContext): string {
+  return markEmailOnlyRegions(html).replace(TOKEN, (_m, key: string) => {
+    const spec = (TOKENS as Record<string, TokenSpec>)[key];
+    if (!spec) {
+      return "";
+    }
+    if (spec.phase === "delivery") {
+      return spec.sentinel;
+    }
+    const value = (ctx as Record<string, string | undefined>)[key];
+    if (value === undefined) {
+      return "";
+    }
+    return spec.escaping === "raw" ? value : escapeHtmlAttr(value);
+  });
+}
+
+/** DELIVERY pass. Fill the frozen render's delivery-phase sentinels for one surface —
+ *  the per-recipient send/test, or a recipient-agnostic archive/preview (generic
+ *  unsubscribe URL, empty sent-to). `surface` selects escaping: the HTML surface escapes
+ *  per the token's rule (unsubscribe URL raw, sent-to attribute-safe); the plain-text
+ *  surface inserts every value raw (no markup to protect). A pure function of (frozen
+ *  bytes, context) and byte-for-byte a direct sentinel replacement — so a retry re-mails
+ *  no one (I4). */
+export function fillDeliveryTokens(
+  input: string,
+  ctx: DeliveryContext,
+  surface: "html" | "text",
+): string {
+  let out = input;
+  for (const t of DELIVERY_TOKENS) {
+    const value = ctx[t.key];
+    const filled = surface === "html" && t.escaping === "attr" ? escapeHtmlAttr(value) : value;
+    out = out.split(t.sentinel).join(filled);
+  }
+  return out;
+}
+
+/** Every `{{ token }}` name a template references, known or not. */
+export function templateTokens(html: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const m of html.replace(REGION_TAG, "").matchAll(TOKEN)) {
+    if (m[1]) {
+      tokens.add(m[1]);
+    }
+  }
+  return tokens;
+}
+
+export type { IdentityField };
+
+const IDENTITY_TOKENS: ReadonlyArray<[token: string, fields: IdentityField[]]> = [
+  [".Publication.Name", ["name"]],
+  [".Publication.Tagline", ["tagline"]],
+  [".Publication.LogoURL", ["logo_url"]],
+  // The logo image carries the name as its alt text.
+  [".Publication.Logo", ["logo_url", "name"]],
+  [".Publication.Address", ["address"]],
+];
+
+/**
+ * The identity fields `template` renders. The identity reaches the frozen bytes only
+ * through the `.Publication.*` tokens, so a field the template does not reference is
+ * not an input to the email: changing it alters no scheduled send, and the re-make
+ * guard (SPEC §9) leaves it alone. The built-in template renders all four.
+ */
+export function identityFieldsInUse(template: string): IdentityField[] {
+  const tokens = templateTokens(template);
+  const fields = IDENTITY_TOKENS.filter(([token]) => tokens.has(token)).flatMap(([, f]) => f);
+  return [...new Set(fields)];
+}
+
+/**
+ * Whether a settings save changes what the render path would put into an email:
+ * the template's text, or an identity field the template renders (`identityFieldsInUse`,
+ * taken from `next`, the template the save leaves in place). Compared on the resolved
+ * branding, not the stored strings, so saving the built-in default's text over a blank
+ * template, or a name equal to the From display name over a blank one, is no change.
+ */
+export function brandingDiffers(current: EmailBranding, next: EmailBranding): boolean {
+  if (current.template !== next.template) {
+    return true;
+  }
+  return identityFieldsInUse(next.template).some(
+    (field) => current[BRANDING_KEY[field]] !== next[BRANDING_KEY[field]],
+  );
+}
+
+// Where each identity field, named as the settings surface names it, sits in the branding.
+const BRANDING_KEY: Record<IdentityField, keyof EmailBranding> = {
+  name: "name",
+  tagline: "tagline",
+  logo_url: "logoUrl",
+  address: "address",
+};
+
+export interface TemplateValidation {
+  errors: string[];
+  warnings: string[];
+}
+
+/** An `<img>` whose `src` is the bare logo URL: empty, so broken, while no logo is set. */
+const LOGO_URL_AS_IMG_SRC = /<img\b[^>]*\bsrc\s*=\s*["']?\s*\{\{\s*\.Publication\.LogoURL\s*\}\}/i;
+
+/** `{{ .Post.Body }}`, looked for inside an email-only region. */
+const POST_BODY = /\{\{\s*\.Post\.Body\s*\}\}/;
+
+/** What is wrong with a template's email-only regions: a condition other than
+ *  `.IsEmail`, a region inside another, an `{{ end }}` with nothing to close, a region
+ *  never closed, or the post body inside one (the public page would have no post). An
+ *  unsupported condition still opens a region, so its own `{{ end }}` isn't reported too. */
+function regionErrors(html: string): string[] {
+  const errors: string[] = [];
+  let openAt = -1;
+  for (const m of html.matchAll(REGION_TAG)) {
+    const cond = m[1];
+    const at = m.index ?? 0;
+    if (cond === undefined) {
+      if (openAt < 0) {
+        errors.push("{{ end }} has no {{ if .IsEmail }} to close.");
+      } else if (POST_BODY.test(html.slice(openAt, at))) {
+        errors.push(
+          "{{ .Post.Body }} can’t be inside {{ if .IsEmail }}: the archived post would have no content.",
+        );
+      }
+      openAt = -1;
+      continue;
+    }
+    if (cond !== IS_EMAIL) {
+      const tag = cond ? `{{ if ${cond} }}` : "{{ if }}";
+      errors.push(`${tag} isn’t supported. The one condition is {{ if .IsEmail }}.`);
+    }
+    if (openAt >= 0) {
+      errors.push("An email-only region can’t contain another. Close the first with {{ end }}.");
+    }
+    openAt = at + m[0].length;
+  }
+  if (openAt >= 0) {
+    errors.push("{{ if .IsEmail }} is never closed. Add {{ end }} after the email-only part.");
+  }
+  if (/\{\{\s*else\s*\}\}/.test(html)) {
+    errors.push(
+      "{{ else }} isn’t supported. A region is shown in the email and left out of the archived post; there is no alternative.",
+    );
+  }
+  return errors;
+}
+
+/** Check a template for the variables an email can't do without (errors) and for
+ *  likely mistakes (warnings). Errors block the send; warnings are surfaced but
+ *  allowed. The unsubscribe error is load-bearing: no email may ship without a way
+ *  to leave (I2, §10). */
+export function validateEmailTemplate(html: string): TemplateValidation {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const tokens = templateTokens(html);
+
+  errors.push(...regionErrors(html));
+  if (!tokens.has(".Post.Body")) {
+    errors.push("Every email must include {{ .Post.Body }} to render the content of the post.");
+  }
+  if (!tokens.has(".Email.UnsubscribeURL")) {
+    errors.push(
+      "Every email must carry an unsubscribe link. Add {{ .Email.UnsubscribeURL }} to the template.",
+    );
+  }
+  if (!tokens.has(".Email.ViewInBrowserURL")) {
+    warnings.push("Add {{ .Email.ViewInBrowserURL }} so readers can open the post in a browser.");
+  }
+  for (const t of tokens) {
+    if (!KNOWN_VARS.has(t)) {
+      warnings.push(`{{ ${t} }} is not a known variable and will render empty.`);
+    }
+  }
+  // Anything else in braces (Hugo's `{{- -}}` trim, a function call) is neither a
+  // placeholder nor a region tag, so it would ship as written.
+  for (const m of html
+    .replace(REGION_TAG, "")
+    .replace(TOKEN, "")
+    .matchAll(/\{\{[^}]*\}\}/g)) {
+    if (!/^\{\{\s*else\s*\}\}$/.test(m[0])) {
+      warnings.push(`${m[0]} isn’t something Lettre fills, so it will show as written.`);
+    }
+  }
+  if (LOGO_URL_AS_IMG_SRC.test(html)) {
+    warnings.push(
+      "An <img> whose src is {{ .Publication.LogoURL }} shows as a broken image while no logo is set. Use {{ .Publication.Logo }}, which renders the image only when there is one.",
+    );
+  }
+  if (/<script[\s/>]/i.test(html)) {
+    warnings.push("A <script> tag won’t run in email and may get the message filtered.");
+  }
+  return { errors, warnings };
+}
+
+// --- CSS inlining (css-inline, WASM) ---------------------------------------------
+
+/**
+ * Run `init` once and share its promise, but forget a rejection so the next call tries
+ * again. A cached rejection would outlive its cause: one transient failure to load the
+ * inliner would fail every render (preview, test, and send) until the isolate recycled.
+ */
+export function onceUntilRejected(init: () => Promise<void>): () => Promise<void> {
+  let ready: Promise<void> | null = null;
+  return () => {
+    if (!ready) {
+      ready = init().catch((err: unknown) => {
+        ready = null;
+        throw err;
+      });
+    }
+    return ready;
+  };
+}
+
+// initWasm is async (it instantiates the module), so it runs once per isolate, or again
+// after a failure, and callers just await inlineEmailCss. Its bindings take the module
+// wrapped in `{ module_or_path }` and warn on a bare one, but the package's declaration
+// still names only the bare form, hence the cast.
+const inlinerReady = onceUntilRejected(() =>
+  initWasm({ module_or_path: wasmModule } as unknown as Parameters<typeof initWasm>[0]),
+);
+
+/** Inline the `<style>` rules onto elements and keep un-inlinable `@media` rules in a
+ *  `<style>` block. Deterministic: same input → same output (holds I5). */
+export async function inlineEmailCss(html: string): Promise<string> {
+  await inlinerReady();
+  return inline(html, { keepAtRules: true });
+}
+
+// --- branding resolution ---------------------------------------------------------
+
+/** Everything the render path needs from settings to fill a template: the template
+ *  itself plus the publication identity that a template may show inside the email. */
+export interface EmailBranding {
+  template: string;
+  name: string;
+  tagline: string;
+  logoUrl: string;
+  address: string;
+}
+
+/** Resolve the branding the email carries from stored settings + deploy config. A
+ *  blank template falls back to the built-in default; a blank name falls back to the
+ *  From display name, and with neither the email carries no name rather than a made-up
+ *  one (SPEC §9). */
+export function resolveBranding(settings: AppSettings, config: Config): EmailBranding {
+  const p = settings.publication;
+  return {
+    template: settings.emailTemplate.trim() ? settings.emailTemplate : DEFAULT_EMAIL_TEMPLATE,
+    name: publicationName(p.name, config.fromAddress),
+    tagline: p.tagline,
+    logoUrl: publicationLogoUrl(config.mediaPublicBase, p.logo),
+    address: p.address,
+  };
+}
+
+/** Neutral branding (the default template, empty identity) — for tests and the dev
+ *  seed, which don't need real settings to exercise the render path. */
+export function defaultBranding(): EmailBranding {
+  return { template: DEFAULT_EMAIL_TEMPLATE, name: "", tagline: "", logoUrl: "", address: "" };
+}
+
+/** The built-in template — a signed sign-off (logo, name, tagline) over a "Powered by
+ *  Lettre · Unsubscribe · View in browser" footer, with the mailing address under it
+ *  (an empty line while none is set). All but "Powered by Lettre" is email-only, so the
+ *  archived post keeps the sign-off and a footer but no inbox links or address. With no logo set, the logo cell is empty and
+ *  collapses, so the sign-off is the name and tagline alone. Authored with a `<style>` block;
+ *  the render path inlines it. Sent out of the box when the operator sets no template. */
+export const DEFAULT_EMAIL_TEMPLATE = `<style>
+  .email {
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    color: #18181b;
+  }
+  .email h1,
+  .email h2,
+  .email h3 {
+    font-family: Georgia, 'Times New Roman', serif;
+    line-height: 1.2;
+  }
+  .email a {
+    color: #3355cc;
+  }
+  .email .rule {
+    border: 0;
+    border-top: 1px solid #e4e4e7;
+    margin: 28px 0;
+  }
+  .signoff td {
+    vertical-align: middle;
+  }
+  .signoff .logo {
+    display: block;
+    border-radius: 9px;
+    margin-right: 14px;
+  }
+  .signoff .name {
+    font: 600 17px/1.2 Georgia, 'Times New Roman', serif;
+  }
+  .signoff .tagline {
+    font-size: 13px;
+    color: #52525b;
+    margin-top: 2px;
+  }
+  .footer {
+    margin-top: 22px;
+    font-size: 12px;
+    line-height: 1.7;
+    color: #8a8a93;
+  }
+  .footer a {
+    color: #8a8a93;
+    text-decoration: underline;
+  }
+  .footer .address {
+    margin-top: 6px;
+  }
+  @media (prefers-color-scheme: dark) {
+    .email {
+      color: #ededed !important;
+    }
+    .email a {
+      color: #93c5fd !important;
+    }
+    .email .rule {
+      border-color: #2e2e33 !important;
+    }
+    .signoff .name {
+      color: #ededed !important;
+    }
+    .signoff .tagline {
+      color: #a1a1aa !important;
+    }
+    .footer {
+      color: #a1a1aa !important;
+    }
+    .footer a {
+      color: #a1a1aa !important;
+    }
+  }
+</style>
+
+<div class="email">
+  {{ .Post.Body }}
+
+  <hr class="rule" />
+
+  <table class="signoff" role="presentation" cellpadding="0" cellspacing="0">
+    <tr>
+      <td class="logo-cell">{{ .Publication.Logo }}</td>
+      <td>
+        <div class="name">{{ .Publication.Name }}</div>
+        <div class="tagline">{{ .Publication.Tagline }}</div>
+      </td>
+    </tr>
+  </table>
+
+  <div class="footer">
+    Powered by Lettre{{ if .IsEmail }} ·
+    <a href="{{ .Email.UnsubscribeURL }}">Unsubscribe</a> ·
+    <a href="{{ .Email.ViewInBrowserURL }}">View in browser</a>
+    <div class="address">{{ .Publication.Address }}</div>{{ end }}
+  </div>
+</div>`;

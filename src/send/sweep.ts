@@ -1,0 +1,241 @@
+/**
+ * The reconciling sweep — runs once a minute from scheduled(). Five jobs:
+ *   1. fire due sends (and loudly flag any that missed their fire time), after a halted
+ *      send whose retry is due has asked the provider, so a send fired this tick joins a
+ *      halt that still stands instead of starting it over (SPEC §12),
+ *   2. resume sends left mid-flight by a crash (expired lease), never a wedged one, which
+ *      no run can move until Resolve (`WEDGED_SEND`),
+ *   3. apply receipts held for a row that had not learned its message id yet
+ *      (`applyHeldReceipts`), after the sends, so a batch answered this tick takes its own,
+ *      then flag anomalies (sends in flight too long with nothing handed off, wedged sends
+ *      awaiting Resolve),
+ *   4. notify the publisher of sends that went out or ran into a problem (`notify/notify.ts`),
+ *      then record what the tick's emails said about whether email is getting out
+ *      (`services/sending.ts`), in one statement held back for it,
+ *   5. on a tick that sent nothing, ask the provider about its account when the last answer
+ *      is old (`services/provider_status.ts`), with what notifying left of the budget.
+ *
+ * The sends a tick runs keep to the account's own send rate once that check has read it
+ * (`sesSendRate`), read at most once a tick and only when there is a send to run.
+ *
+ * A missed fire is still delivered — the render is frozen, so lateness is a
+ * timeliness problem, not a correctness one — but it is never silent (§12).
+ *
+ * One tick is one invocation, so it shares one subrequest budget (`budget.ts`) across
+ * its own queries and every send it runs, and one clock (`pace.ts`), so the sends it runs
+ * keep the provider's rate between them and stop before the next tick; a send the budget
+ * or the clock can't reach this tick is picked up on the next. A send the provider halted is left alone until its backoff
+ * says its next retry is due (`HALT_BACKOFF_MS`), so waiting costs only the query.
+ * Notifying gets what the sends leave plus a reserve held back up front, so a long send
+ * spending every tick's budget can't starve the notification that says it is stuck.
+ *
+ * Each tick ends with one `sweep.tick` line counting what it did, even when it throws
+ * (then with `ok: false`, after a `sweep.error`), and each anomaly is its own `error` line
+ * per send (`send.missed`, `send.stuck`, `send.wedged`), repeated every tick the condition
+ * lasts, after the check that found it: the log describes the tick, it never steers it
+ * (SPEC §12).
+ */
+
+import * as sends from "../db/sends";
+import type { AppEnv } from "../env";
+import { getConfig } from "../env";
+import { errorText, log } from "../lib/log";
+import { HALT_RETRY_SLACK_MS, MISSED_THRESHOLD_MS, STUCK_THRESHOLD_MS } from "../lib/time";
+import { NOTIFY_RESERVE, notifyPublisher } from "../notify/notify";
+import { getProvider } from "../providers";
+import { drainSimulatedWebhooks } from "../providers/simulate";
+import { accountForPacing, refreshProviderAccount, sesSendRate } from "../services/provider_status";
+import { Contacts, runOutcome } from "../services/sending";
+import { applyHeldReceipts } from "../services/webhook_events";
+import { Budget, metered } from "./budget";
+import { MIN_RUN_COST, runSend } from "./loop";
+import { SendWindow } from "./pace";
+import { idleSince } from "./stuck";
+
+/** The two anomaly queries at the end of a tick, held back from the budget up front so
+ *  they run whatever the sends spent. */
+const ANOMALY_CHECKS = 2;
+
+/** The D1 statements one held receipt is allowed when the tick plans its pass: a receipt
+ *  that finds its row first try reads at most three times and writes one batch of three. */
+const HELD_RECEIPT_COST = 6;
+
+/** The most held receipts one tick applies, so a backlog spreads over ticks. */
+const HELD_RECEIPTS_PER_TICK = 50;
+
+/** What a tick found, for its `sweep.tick` line: sends due to fire and sends to resume
+ *  (each run logs what it did), and the sends flagged. */
+interface TickCounts {
+  due: number;
+  resumable: number;
+  missed: number;
+  stuck: number;
+  wedged: number;
+}
+
+export async function sweep(env: AppEnv): Promise<void> {
+  const now = Date.now();
+  const tick: TickCounts = { due: 0, resumable: 0, missed: 0, stuck: 0, wedged: 0 };
+  let ok = false;
+  try {
+    await runTick(env, now, tick);
+    ok = true;
+  } catch (err) {
+    log.error("sweep.error", { error: errorText(err) });
+    throw err;
+  } finally {
+    log.info("sweep.tick", { ...tick, ok, durationMs: Date.now() - now });
+  }
+}
+
+async function runTick(env: AppEnv, now: number, tick: TickCounts): Promise<void> {
+  const config = getConfig(env);
+  // Handle each send at most once per tick. A transient failure releases the
+  // lease, so without this a just-failed send would be retried again in the same
+  // sweep; instead it waits for the next tick (the backoff).
+  const handled = new Set<string>();
+  const held = ANOMALY_CHECKS + NOTIFY_RESERVE;
+  const contacts = new Contacts();
+  const whole = new Budget(config.subrequestBudget);
+  const budget = new Budget(whole.limit - held, whole.queryLimit - held);
+  const db = metered(env.DB, budget);
+  const window = new SendWindow(getProvider(config, env).maxRequestRate);
+  // The send rate this tick's sends keep to, read the first time a send runs. A read that
+  // fails paces by the deployment's own rate instead, so reading the account never stops a
+  // send (SPEC §13).
+  let rate: Promise<number | undefined> | undefined;
+  const sendRate = (): Promise<number | undefined> => {
+    rate ??=
+      config.provider === "ses"
+        ? accountForPacing(db, config).then(
+            (a) => sesSendRate(config, a).value,
+            (err: unknown) => {
+              log.warn("provider.pacing_unread", { error: errorText(err) });
+              return config.sesMaxSendRate;
+            },
+          )
+        : Promise.resolve(undefined);
+    return rate;
+  };
+
+  // Sends left mid-flight whose lease has expired, and halted ones whose next retry is due.
+  // Read first, so a halt's due retry can run before anything else this tick.
+  const resumable = await sends.resumableSends(db, now, now + HALT_RETRY_SLACK_MS);
+  const resume = async (s: (typeof resumable)[number]): Promise<void> => {
+    if (handled.has(s.id) || !budget.affords(MIN_RUN_COST)) {
+      return;
+    }
+    handled.add(s.id);
+    tick.resumable += 1;
+    await safeRun(env, s.id, budget, window, await sendRate(), contacts);
+  };
+
+  // 1) A halted send whose retry is due asks the provider first. A halt is the account's or
+  // the provider's, so its answer is every send's: a send fired after it this tick joins a
+  // halt that stands, rather than asking itself and starting the refusal over (a second
+  // email, the backoff back to its first step) (SPEC §12).
+  for (const s of resumable) {
+    if (s.halt_reason !== null) {
+      await resume(s);
+    }
+  }
+
+  // 2) Due scheduled sends.
+  for (const s of await sends.dueSends(db, now)) {
+    const lag = now - s.fire_at;
+    if (lag > MISSED_THRESHOLD_MS) {
+      log.error("send.missed", { sendId: s.id, postId: s.post_id, lagMs: lag });
+      tick.missed += 1;
+    }
+    handled.add(s.id);
+    tick.due += 1;
+    await safeRun(env, s.id, budget, window, await sendRate(), contacts);
+  }
+
+  // 3) The rest: interrupted sends whose lease has expired, while the budget has room for
+  // a run.
+  for (const s of resumable) {
+    await resume(s);
+  }
+
+  // 4) Receipts held for their row, with what the sends left of the budget: the list query,
+  // the release, and each receipt's own. Caught, so a failed pass never stops the flags or
+  // the publisher's notice; what it left stays held for the next tick.
+  const heldRoom = Math.floor((budget.queriesLeft - 2) / HELD_RECEIPT_COST);
+  if (heldRoom > 0) {
+    try {
+      await applyHeldReceipts(db, now, Math.min(heldRoom, HELD_RECEIPTS_PER_TICK));
+    } catch (err) {
+      log.error("receipt.release_error", { error: errorText(err) });
+    }
+  }
+
+  // 5) Loud anomaly flags: the ANOMALY_CHECKS held back above, so on the raw handle.
+  for (const s of await sends.stuckSends(env.DB, now - STUCK_THRESHOLD_MS)) {
+    log.error("send.stuck", {
+      sendId: s.id,
+      postId: s.post_id,
+      startedAt: s.started_at,
+      idleSince: idleSince(s),
+    });
+    tick.stuck += 1;
+  }
+  for (const s of await sends.wedgedSends(env.DB)) {
+    log.error("send.wedged", { sendId: s.id, postId: s.post_id, recipients: s.c_in_flight });
+    tick.wedged += 1;
+  }
+
+  // 6) Tell the publisher: the reserve plus whatever the sends left. Last, and caught, so a
+  // notification can never delay or break a send.
+  const rest = new Budget(
+    NOTIFY_RESERVE + Math.max(0, budget.left),
+    NOTIFY_RESERVE + Math.max(0, budget.queriesLeft),
+  );
+  try {
+    await notifyPublisher(env, rest, contacts);
+  } catch (err) {
+    log.error("notify.error", { error: errorText(err) });
+  }
+
+  // What the tick's emails said about whether email is getting out (SPEC §13), in one
+  // statement from what notifying left, which is nearly always room: notifying spends its
+  // reserve only on a tick with notices due and nothing else left. A tick without the room
+  // records nothing, and a later one records the provider's next answer. Caught inside.
+  if (rest.affords(1)) {
+    await contacts.record(metered(env.DB, rest), config);
+  }
+
+  // 7) Ask the provider about its account, only on a tick that sent nothing, so its requests
+  // never meet a send's, and caught, so a failed check never fails the tick.
+  if (tick.due === 0 && tick.resumable === 0) {
+    try {
+      await refreshProviderAccount(env, config, rest, now);
+    } catch (err) {
+      log.error("provider.account_error", { error: errorText(err) });
+    }
+  }
+
+  // Dev-only: feed any now-due synthetic delivery webhooks through the real ingest, so
+  // an in-flight simulated send settles (delivered / bounced / complained) over ticks
+  // exactly as a real provider's webhooks would. No-op unless the simulation is active.
+  await drainSimulatedWebhooks(env, config);
+}
+
+/** Run one send, adding what its run says about whether email is getting out to `contacts`
+ *  (SPEC §13). */
+async function safeRun(
+  env: AppEnv,
+  sendId: string,
+  budget: Budget,
+  window: SendWindow,
+  sendRate: number | undefined,
+  contacts: Contacts,
+): Promise<void> {
+  try {
+    const run = await runSend(env, sendId, budget, window, sendRate);
+    contacts.add("list", runOutcome(run.accepted, run.refusal), run.answeredAt ?? Date.now());
+  } catch (err) {
+    // One bad send must not stop the sweep; it will be retried next tick.
+    log.error("send.error", { sendId, error: errorText(err) });
+  }
+}

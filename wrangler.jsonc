@@ -1,0 +1,92 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "lettre",
+  "main": "src/index.ts",
+  // Capped at the newest date the Vitest pool's bundled workerd supports; bump
+  // when @cloudflare/vitest-plugin ships a newer runtime.
+  "compatibility_date": "2026-08-22",
+  "compatibility_flags": ["nodejs_compat"],
+  // Workers Logs, which indexes the fields of each JSON log line (src/lib/log.ts). The
+  // head_sampling_rate stays at its default of 1, in every env: sampling is per invocation,
+  // so a lower rate could drop the one sweep tick that carries a send.stuck or send.missed,
+  // and a newsletter's volume is nowhere near needing it.
+  "observability": { "enabled": true },
+
+  // Bundle the setup guide (docs/README.md and its section folders) into the Worker as Text
+  // modules, so the in-app Docs surface serves the repo markdown verbatim
+  // (source of truth) without a separate build step. Applies to bundling under
+  // wrangler dev/deploy AND the Vitest pool.
+  "rules": [{ "type": "Text", "globs": ["**/*.md"], "fallthrough": true }],
+
+  // ---------------------------------------------------------------------------
+  // This is Lettre's development config, used by `wrangler dev` and the Vitest pool, and
+  // nothing deploys it: an instance is its own repository, scaffolded by `lettre init` from
+  // template/wrangler.jsonc, which holds the `production` environment an operator fills in.
+  // Its mail transport is the in-memory `fake` adapter, so dev can never reach a real inbox.
+  // ---------------------------------------------------------------------------
+
+  // A bare `wrangler deploy` of this config would put the dev app, with its dev sign-in, on
+  // a public address and run its send sweep on whatever database it is bound to. With
+  // workers.dev and preview URLs off, no route, and no schedule, it answers on none and never
+  // sweeps (SPEC, Trusted, not guarded). The empty `crons` stays present: wrangler clears a
+  // schedule only when given a list. None of these affects `wrangler dev`, where
+  // cli/sweep-ticker.mjs runs the sweep on its own clock.
+  "workers_dev": false,
+  "preview_urls": false,
+  "triggers": { "crons": [] },
+
+  // Editor SPA (the admin app lives under /dashboard), served from the generated tree
+  // that scripts/build-client.mjs emits from public/ + client/ — never from public/
+  // itself, which is source. Unmatched requests fall through to the Worker so the
+  // API/reader routes still run.
+  "assets": { "directory": "./dist/public", "not_found_handling": "none" },
+
+  // Emit that tree as wrangler's own build step, so wrangler never serves a stale one (the
+  // production build by default; scripts/dev.mjs asks for the dev build via
+  // LETTRE_CLIENT_DEV). watch_dir lists src/ (wrangler's default) and leaves client/ and
+  // public/ out: under `wrangler dev` this re-runs only on Worker edits, while client/ and public/
+  // edits are handled by the watch that scripts/dev.mjs runs beside it — the two must not
+  // both react to the same change. demo/ is watched too: its Markdown is bundled into the
+  // Worker (src/dev/demo.ts), so an edit there has to rebuild it before the next seed.
+  // The guide's folders and its landing page are watched for the same reason: the in-app
+  // Docs tab serves their Markdown from the bundle (src/docs/). Not all of docs/, so a SPEC
+  // edit restarts nothing.
+  "build": {
+    "command": "node scripts/build-client.mjs",
+    "watch_dir": [
+      "./src",
+      "./demo",
+      "./docs/README.md",
+      "./docs/get-started",
+      "./docs/guides",
+      "./docs/reference",
+      "./docs/publishing"
+    ]
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "lettre-dev",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "lettre-media-dev" }],
+
+  // Self-contained by default: ARCHIVE_ORIGIN defaults to APP_ORIGIN and
+  // MEDIA_PUBLIC_BASE to `${APP_ORIGIN}/media`, both resolved in getConfig, so
+  // they're omitted here. Set them only to opt into an apex archive or a media
+  // custom domain (docs/reference/01-configuration.md). ARCHIVE_BASE_PATH drives both
+  // the archive URL and the route that serves it. PROVIDER names `fake` on purpose: unset
+  // means no provider connected (SPEC §13), which refuses every send.
+  "vars": {
+    "PROVIDER": "fake",
+    "APP_ORIGIN": "http://localhost:8787",
+    "ARCHIVE_BASE_PATH": "/archive",
+    "SENDING_DOMAIN": "send.example.com",
+    "FROM_ADDRESS": "Newsletter <newsletter@send.example.com>",
+    "AWS_REGION": "us-east-1"
+  }
+}

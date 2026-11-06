@@ -1,0 +1,35 @@
+# Sending rules
+
+Email law asks a few things of every newsletter. Lettre handles the ones a sending app can, and the rest are yours, since they depend on what you write and whom you write to.
+
+This page covers what Lettre handles, what you handle, and how to act on a reader's request to leave or be deleted. It describes US law (CAN-SPAM) unless it says otherwise. It's general information, not legal advice. When your situation is unclear, ask a lawyer.
+
+## What Lettre handles
+
+- **Consent.** Lettre mails only people who confirmed they want your newsletter. Someone who subscribes gets an email with a link, and only once they confirm do they receive posts. People you import come with your old service's record of their consent, and your word for it ([Bring your existing list](01-your-list.md#what-carries-over)).
+- **Unsubscribing.** Every email has an unsubscribe link, and the one-click unsubscribe header that Gmail and Yahoo ask bulk senders for. It takes effect at once. US law allows up to 10 business days.
+- **Bounces and complaints.** An address that bounces is never mailed again, so a bad address can't keep hurting your sending reputation. A reader who marks your email as spam is unsubscribed, as if they had used the link, and you can't add them back: only their own sign-up does.
+- **Sender authentication.** Your emails are signed with DKIM for your own domain, and SPF and DMARC records in its DNS vouch for them. You set them up in [Connect Amazon SES](../get-started/05-ses.md), and mailbox providers now expect them.
+
+## What you handle
+
+- **An honest From name and subject line.** The From name should say who the email is from, and the subject should match what's inside. The From name and address are set when Lettre is deployed ([Deploy the app](../get-started/02-deploy.md#4-configure-production)).
+- **Marking ads as ads.** When an email is an advertisement, say so clearly. In a newsletter that's mostly writing, labeling a sponsor's section is enough.
+- **A mailing address, when an email is commercial.** Most newsletters don't need one. [When to provide a mailing address](03-name-your-publication.md#when-to-provide-a-mailing-address) says when you do, beside where you add one.
+- **Requests readers send you.** A reader who replies to a post writes to your From address. Replies reach you once that address forwards to an inbox you read, as [Connect Amazon SES](../get-started/05-ses.md#8-receive-replies-at-your-from-address) sets up. Lettre never sees a reply, so carrying out what a reader asks is up to you.
+
+## When a reader asks to leave or to be deleted
+
+Lettre offers readers no form for deleting their data, so they ask you. In many places the law gives a reader that right. The European Union's GDPR, for example, may apply if you have readers there.
+
+- **Say how to reach you.** Your privacy notice, wherever you publish it, should say how readers ask you about their data. Replying to any post works once replies reach your inbox.
+- **To stop the email,** find the reader under **Subscribers**, and choose **Unsubscribe** from their ⋯ menu. It works whether or not they've confirmed, records that they asked, and they can rejoin by subscribing again.
+- **To stop mailing someone on your own judgment,** not at their request, choose **Block** instead. It stops every email to the address whatever its status, and **Unblock** undoes it.
+- **To delete their data,** choose **Erase** from the same menu, even for someone who already unsubscribed. It unsubscribes them and deletes how they joined and the evidence for it, and can't be undone. Past send records show an erased recipient in their place. Lettre keeps only the address and when you erased it, so it's never mailed again, beside any bounce or block the address already had. The reader can still rejoin by subscribing and confirming themselves, but you can't add them back.
+- **Act promptly.** Under the [GDPR](https://eur-lex.europa.eu/eli/reg/2016/679/oj), you answer within a month in most cases (Article 12). The right to have data deleted is Article 17, and Article 13 asks you to tell readers about it when they sign up.
+
+## Outside the US
+
+Other countries have their own rules, and they often ask more. Canada's anti-spam law (CASL) usually counts more email as commercial, and asks for a mailing address in it ([Government of Canada guidance](https://ised-isde.canada.ca/site/canada-anti-spam-legislation/en)). The GDPR covers how you keep readers' data. If many of your readers live outside the US, check the rules where they live.
+
+The FTC's [CAN-SPAM compliance guide](https://www.ftc.gov/business-guidance/resources/can-spam-act-compliance-guide-business) is the plain-language source for the US rules on this page.

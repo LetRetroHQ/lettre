@@ -1,0 +1,1367 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Post } from "../../shared/posts";
+import type { SendSummary } from "../../shared/sends";
+import type { SubscriberCounts } from "../../shared/subscribers";
+import { appState } from "../state";
+import { condition, feedReads, listReads, sendServer, sendView } from "../test/send_server";
+import {
+  $,
+  $$,
+  type FakeApi,
+  type FakeRoute,
+  fakeApi,
+  mount,
+  providerStatus,
+  resetShell,
+  sendSummary,
+  settingsResponse,
+  stubClipboard,
+  unmount,
+} from "../test/support";
+import { renderDashboard } from "./dashboard";
+
+const NOW = 1_700_000_000_000;
+const page = { total: 0, limit: 200, offset: 0, sort: "", dir: "desc" };
+
+const post = (over: Partial<Post> = {}): Post => ({
+  id: "p1",
+  slug: "owls",
+  slug_auto: true,
+  unlisted_token: "t-p1",
+  archive_url: "https://news.example.com/archive/owls",
+  unlisted_url: "https://news.example.com/email/t-p1",
+  published_at: null,
+  archive_live: false,
+  subject: "<b>Owls</b> & co",
+  status: "draft",
+  email_only: false,
+  current_revision: "r1",
+  created_at: NOW - 100_000,
+  updated_at: NOW - 50_000,
+  author: "human",
+  author_client: "editor",
+  send: null,
+  actions: [],
+  ...over,
+});
+// A send that went out an hour ago: 98 delivered, 2 bounced.
+const send = (over: Partial<SendSummary> = {}): SendSummary =>
+  sendSummary({
+    post_id: "p3",
+    status: "sent",
+    fire_at: NOW - 3_600_000,
+    subject: "Waxwings",
+    recipient_count: 100,
+    scheduled_at: NOW - 7_200_000,
+    started_at: NOW - 3_600_000,
+    completed_at: NOW - 3_500_000,
+    audience_resolved_at: NOW - 3_600_000,
+    c_delivered: 98,
+    c_bounced: 2,
+    ...over,
+  });
+const counts: SubscriberCounts = { pending: 3, confirmed: 40, unsubscribed: 2, suppressed: 1 };
+const none: SubscriberCounts = { pending: 0, confirmed: 0, unsubscribed: 0, suppressed: 0 };
+
+// What the dashboard reads from the boot-time settings: the identity and the origins.
+const config = () =>
+  settingsResponse({
+    settings: {
+      publication: { name: "Birds Weekly", tagline: "Owls & more", address: "", logo_url: "" },
+    },
+    deployment: { archive_origin: "https://birds.example" },
+  });
+
+// The dashboard's world: the posts and subscribers it reads once, and a stateful send server
+// that answers the sends list and the layer's feed over one change sequence, so every read
+// sees the same world and a spec's write is what any client's would be.
+function world(
+  posts: Post[],
+  srv: ReturnType<typeof sendServer>,
+  subs = counts,
+  extra: FakeRoute[] = [],
+) {
+  return fakeApi([
+    ...extra,
+    ...srv.routes,
+    { path: "/api/posts", reply: () => ({ posts, page: { ...page, total: posts.length } }) },
+    { path: "/api/subscribers", reply: () => ({ counts: subs, subscribers: [], page }) },
+  ]);
+}
+
+const scheduled = (over: Partial<SendSummary> = {}) =>
+  send({
+    id: "x2",
+    post_id: "p2",
+    subject: "Gulls",
+    status: "scheduled",
+    fire_at: NOW + 60_000,
+    started_at: null,
+    completed_at: null,
+    audience_resolved_at: null,
+    c_delivered: 0,
+    c_bounced: 0,
+    recipient_count: 40,
+    ...over,
+  });
+const sending = (over: Partial<SendSummary> = {}) =>
+  send({
+    id: "x3",
+    post_id: "p4",
+    subject: "Swifts",
+    status: "sending",
+    fire_at: NOW - 60_000,
+    started_at: NOW - 60_000,
+    completed_at: null,
+    c_pending: 50,
+    c_accepted: 10,
+    c_delivered: 0,
+    c_bounced: 0,
+    ...over,
+  });
+
+const cards = () => $$("#dashScheduled .sched-card").map((c) => c.dataset.post);
+const countdown = (post: string) => $(`#dashScheduled .sched-card[data-post='${post}'] .countdown`);
+
+describe("dashboard", () => {
+  let fake: FakeApi;
+  beforeEach(() => {
+    resetShell();
+    localStorage.clear();
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    location.hash = "#/dashboard";
+    appState.appConfig = config();
+  });
+  afterEach(() => {
+    fake?.restore();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("renders the identity, the tiles into the roster, the queue, the drafts, the sent table, and the publication and API cards", async () => {
+    const posts = [
+      post(),
+      post({
+        id: "p2",
+        slug: "gulls",
+        subject: "Gulls",
+        status: "scheduled",
+        send: sendView(sendSummary({ id: "s2", post_id: "p2", fire_at: NOW + 60_000 })),
+      }),
+      post({ id: "p3", slug: "waxwings", subject: "Waxwings", status: "sent" }),
+    ];
+    const srv = sendServer([scheduled()]);
+    srv.put(send(), { archive: "https://birds.example/archive/waxwings" });
+    fake = world(posts, srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect($(".dash-head h1").textContent).toBe("Birds Weekly");
+    expect($(".dash-tagline").textContent).toBe("Owls & more");
+    expect(document.querySelector(".health")).toBeNull(); // nothing wrong, nothing said
+    expect(document.querySelector("#dashActive .active-card")).toBeNull();
+    const tiles = $$<HTMLAnchorElement>(".tile");
+    expect(tiles.map((t) => t.getAttribute("href"))).toEqual([
+      "#/subscribers/confirmed",
+      "#/subscribers/pending",
+      "#/subscribers/unsubscribed",
+      "#/subscribers/suppressed",
+    ]);
+    expect(tiles.map((t) => $(".tile-n", t).textContent)).toEqual(["40", "3", "2", "1"]);
+    expect(tiles[0]?.classList.contains("tile-emph")).toBe(true);
+    const card = $("#dashScheduled .sched-card");
+    expect(card.dataset.post).toBe("p2");
+    expect($(".countdown", card).textContent).toBe("Sends in 1m 00s");
+    expect(card.textContent).toMatch(/40 recipients/);
+    expect($("tr[data-id='p1'] a").textContent).toBe("<b>Owls</b> & co"); // a subject is text
+    expect(document.querySelector("tr[data-id='p1'] b")).toBeNull();
+    expect($$("tr[data-id]")).toHaveLength(1); // drafts only
+    const sent = $("tr[data-send='x1']");
+    expect($("td a", sent).getAttribute("href")).toBe("#/sent/x1");
+    expect($(".badge", sent).textContent).toBe("sent");
+    expect($("td.num .n", sent).textContent).toBe("98");
+    expect($(".ghost-link", sent).getAttribute("href")).toBe(
+      "https://birds.example/archive/waxwings",
+    );
+    // The publication card names only the home page: its address to copy, and the way out.
+    expect($$(".pub-card [data-copy]").map((b) => b.dataset.copy)).toEqual([
+      "https://app.birds.example",
+    ]);
+    expect($(".pub-card .pub-foot a").getAttribute("href")).toBe("/");
+    // No revision through Claude Code yet: the guide leads, both links at one weight, each led by its glyph.
+    expect($$(".pub-links a").map((a) => a.textContent?.trim())).toEqual([
+      "Connect Claude →",
+      "API reference →",
+    ]);
+    expect($$(".pub-links a").map((a) => a.getAttribute("href"))).toEqual([
+      "#/docs/connect-claude",
+      "#/api-reference",
+    ]);
+    expect($$(".pub-links a svg").length).toBe(2);
+    expect(fake.unhandled).toEqual([]);
+  });
+
+  it("shows the server's advice to move to Workers Paid by the subscriber count, and nothing without it (SPEC §7)", async () => {
+    const advice =
+      "This list has 1,200 confirmed subscribers, on the Workers Free plan’s limits. Workers Free suits a list of up to about 1,000 subscribers.";
+    fake = world([post()], sendServer(), counts, [
+      {
+        path: "/api/subscribers",
+        reply: () => ({ counts, subscribers: [], page, workers_plan_advice: advice }),
+      },
+    ]);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect($(".dash-section .tiles + #dashWorkersPlan").textContent).toBe(advice);
+    fake.restore();
+    fake = world([post()], sendServer());
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(document.querySelector("#dashWorkersPlan")).toBeNull();
+    expect(fake.unhandled).toEqual([]);
+  });
+
+  it("reports Claude as connected once a revision came through Claude Code (SPEC §11)", async () => {
+    fake = world([post({ author: "you@example.com", author_client: "claude-code" })], sendServer());
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect($(".conn-status").textContent).toBe("Claude is connected.");
+    // The same two links, same shape, once connected: the reference first, each with its glyph.
+    expect($$(".pub-links a").map((a) => a.textContent?.trim())).toEqual([
+      "API reference →",
+      "Working with Claude →",
+    ]);
+    expect($$(".pub-links a svg").length).toBe(2);
+    expect($("#dashScheduled").textContent).toBe("Nothing scheduled.");
+    expect($$(".dash-section").find((s) => s.textContent?.startsWith("Sent"))?.textContent).toMatch(
+      /No sends yet\./,
+    );
+  });
+
+  it("reports Claude as connected once a revision came through Claude's connector (SPEC §11)", async () => {
+    fake = world([post({ author: "you@example.com", author_client: "claude" })], sendServer());
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect($(".conn-status").textContent).toBe("Claude is connected.");
+    expect($$(".pub-links a").map((a) => a.getAttribute("href"))).toEqual([
+      "#/api-reference",
+      "#/docs/connect-claude/working-with-claude",
+    ]);
+    expect(fake.unhandled).toEqual([]);
+  });
+
+  it("doesn't call a service token's revision Claude, since a service token is automation (SPEC §11)", async () => {
+    fake = world([post({ author: "service", author_client: null })], sendServer());
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(document.querySelector(".conn-status")).toBeNull();
+    expect($(".pub-links a").textContent?.trim()).toBe("Connect Claude →");
+    expect(fake.unhandled).toEqual([]);
+  });
+
+  it("follows from its own list read: the layer's first read asks from that read's cursor", async () => {
+    const srv = sendServer([send()]);
+    // The clock stands still until the spec advances it, so this is the cursor the page's
+    // own read is handed.
+    const cursor = srv.cursor();
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    const [list] = listReads(fake);
+    const [feed] = feedReads(fake);
+    expect(listReads(fake)).toHaveLength(1);
+    expect(feed?.url.searchParams.get("since")).toBe(cursor);
+    // The feed's first read comes after the page's own, never beside it.
+    expect(fake.calls.indexOf(feed!)).toBeGreaterThan(fake.calls.indexOf(list!));
+  });
+
+  it("raises an amber line for a rate limit the deployment causes itself, and none for an ordinary outage (SPEC §12)", async () => {
+    const srv = sendServer();
+    srv.put(sending({ id: "t1", subject: "Terns", c_pending: 5 }), {
+      phase: "backing_off",
+      conditions: [condition.unavailable(true)],
+    });
+    srv.put(sending({ id: "o1", subject: "Owls", c_pending: 5 }), {
+      phase: "backing_off",
+      conditions: [condition.unavailable(false)],
+    });
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    const health = $(".health");
+    expect(health.classList.contains("amber")).toBe(true);
+    expect($$(":scope > div > div", health).map((d) => d.textContent)).toEqual([
+      "Terns: The provider keeps refusing for its sending rate: Maximum sending rate exceeded. Set SES_MAX_SEND_RATE.",
+    ]);
+    expect(fake.unhandled).toEqual([]);
+  });
+
+  it("raises the health line from the server's flags, red for a missed send and a wedged one, and keeps the wedged send out of the active widget", async () => {
+    // The server decides every flag (SPEC §12): eleven minutes in is not in flight too long,
+    // thirty-one is, and a send due six minutes ago is past the missed tolerance.
+    const srv = sendServer([scheduled({ id: "m1", post_id: "p9", fire_at: NOW - 6 * 60_000 })]);
+    srv.put(sending({ id: "w1", subject: "Kinglets", c_pending: 0, c_in_flight: 2 }), {
+      phase: "needs_attention",
+      conditions: [condition.wedged(2, "w1")],
+    });
+    srv.put(sending({ id: "ok1", c_pending: 5, started_at: NOW - 11 * 60_000 }));
+    srv.put(sending({ id: "st1", c_pending: 5, c_in_flight: 1, started_at: NOW - 31 * 60_000 }), {
+      conditions: [condition.stuck()],
+    });
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    const health = $(".health");
+    expect(health.classList.contains("red")).toBe(true);
+    const lines = $$(":scope > div > div", health).map((d) => d.textContent);
+    expect(lines).toEqual([
+      "1 scheduled send passed the fire time without going out.",
+      "Kinglets has 2 ambiguous deliveries awaiting a decision; resolve them on its page.",
+      "Swifts: Nothing has gone out for 31 minutes, with no retry or provider problem to explain it.",
+    ]);
+    // The wedged line leads to where Resolve is: the send's own page.
+    expect($("a", health).getAttribute("href")).toBe("#/sent/w1");
+    expect(
+      $$("#dashActive .active-card")
+        .map((c) => c.dataset.watch)
+        .sort(),
+    ).toEqual(["ok1", "st1"]);
+    // The health line says it is in flight too long, so its card doesn't say it again.
+    expect(document.querySelector("[data-watch='st1'] .active-stuck")).toBeNull();
+    // The missed send's own card says how late it is, in the danger tone.
+    expect(countdown("p9").textContent).toBe("Missed its fire time · 6 min late");
+    expect(countdown("p9").classList.contains("countdown-missed")).toBe(true);
+    expect(fake.unhandled).toEqual([]);
+  });
+
+  it("says Preparing to send from the fire time, calls a due send missed only past the server's tolerance, and then says how late it is", async () => {
+    const srv = sendServer([scheduled({ fire_at: NOW + 20_000 })]);
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(countdown("p2").textContent).toBe("Sends in 20s");
+    // The clock switches the card at the fire time, before any read says so.
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(countdown("p2").textContent).toBe("Preparing to send…");
+    // Just past it the layer reads, sees the send due, and re-reads the queue: still preparing.
+    const before = listReads(fake).length;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(listReads(fake).length).toBe(before + 1);
+    expect(countdown("p2").textContent).toBe("Preparing to send…");
+    expect(document.querySelector(".health")).toBeNull(); // an ordinary slow tick is no miss
+    // Nothing starts it: at the tolerance the feed reports the miss, with no write.
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect($(".health.red").textContent).toMatch(/1 scheduled send passed the fire time/);
+    expect(countdown("p2").textContent).toBe("Missed its fire time · 5 min late");
+    expect(countdown("p2").classList.contains("countdown-missed")).toBe(true);
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    expect(countdown("p2").textContent).toBe("Missed its fire time · 7 min late");
+  });
+
+  it("says Preparing to send when the server reads the send due, even with the page's clock behind", async () => {
+    const srv = sendServer([scheduled({ fire_at: NOW + 20_000 })]);
+    fake = world([post()], srv);
+    vi.setSystemTime(NOW + 25_000); // the server's clock, past the fire time
+    srv.wrap("/api/sends", (req, reply) => {
+      const out = reply(req);
+      vi.setSystemTime(NOW); // the page's, behind it
+      return out;
+    });
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(countdown("p2").textContent).toBe("Preparing to send…");
+  });
+
+  it("hands a due send from the queue to the active-send card on the read that sees it start, never saying Sending now", async () => {
+    const srv = sendServer([scheduled({ fire_at: NOW - 10_000 })]);
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(countdown("p2").textContent).toBe("Preparing to send…");
+    srv.edit("x2", { status: "sending", started_at: Date.now(), c_pending: 30, c_accepted: 10 });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(cards()).toEqual([]);
+    expect($("#dashActive .active-stat").textContent).toMatch(/^Sending: 10 of 40 accepted/);
+    expect(document.body.textContent).not.toMatch(/Sending now/);
+  });
+
+  it("raises one red line with the provider's words for a refused account, and keeps the send out of the active widget", async () => {
+    const refused = (id: string) =>
+      sending({
+        id,
+        c_pending: 40,
+        halt_reason: "account",
+        halt_cause: "credentials",
+        halt_error:
+          "ses 403 UnrecognizedClientException: The security token included in the request is invalid",
+        halted_at: NOW - 60_000,
+      });
+    const srv = sendServer([refused("r1"), refused("r2")]);
+    // Only unavailable, which retries on its own: still an ordinary in-progress send.
+    srv.put(
+      sending({
+        id: "u1",
+        c_pending: 5,
+        halt_reason: "unavailable",
+        halt_cause: "outage",
+        halt_error: "503",
+      }),
+      { phase: "backing_off" },
+    );
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    const health = $(".health");
+    expect(health.classList.contains("red")).toBe(true);
+    expect($$(":scope > div > div", health).map((d) => d.textContent)).toEqual([
+      "2 sends: The provider is refusing the account: ses 403 UnrecognizedClientException: The security token included in the request is invalid. Replace the SES access key in the instance’s secrets, or allow the key ses:SendEmail, ses:SendBulkEmail, ses:SendTemplatedEmail, and ses:SendBulkTemplatedEmail in its IAM policy. If someone else set up Lettre for you, pass this along to them. No one has been marked unsent because of this, and the send resumes on its own at its next retry once the account is fixed.",
+    ]);
+    // Several refused sends link to the Sent page that lists them; one links to its watch.
+    expect($("a", health).getAttribute("href")).toBe("#/sent");
+    expect($$("#dashActive .active-card").map((c) => c.dataset.watch)).toEqual(["u1"]);
+  });
+
+  it("flags an elevated bounce rate on a recent send, amber", async () => {
+    // The server reads the spike off the send (SPEC §8); the dashboard only shows it.
+    const srv = sendServer();
+    srv.put(send({ c_delivered: 90, c_bounced: 10 }), {
+      conditions: [condition.bounceSpike(10, 0.1)],
+    });
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    const health = $(".health");
+    expect(health.classList.contains("amber")).toBe(true);
+    expect(health.textContent).toMatch(/10 recipients bounced \(10%\)/);
+    expect($("a", health).getAttribute("href")).toBe("#/sent/x1");
+  });
+
+  it("says, amber, when a recent send has heard no receipt long after it went out", async () => {
+    // The server reads the silence off the send (SPEC §8); the dashboard only shows it, one
+    // line however many sends it touches, since one broken event destination silences all.
+    const srv = sendServer();
+    srv.put(send({ c_delivered: 0, c_bounced: 0, c_accepted: 40 }), {
+      conditions: [condition.noReceipts(40)],
+    });
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    const health = $(".health");
+    expect(health.classList.contains("amber")).toBe(true);
+    expect(health.textContent).toMatch(/No delivery receipt has arrived for any of the 40/);
+    expect($("a", health).getAttribute("href")).toBe("#/sent/x1");
+
+    srv.put(send({ id: "x2", c_delivered: 0, c_bounced: 0, c_accepted: 9 }), {
+      conditions: [condition.noReceipts(9)],
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect($$(":scope > div > div", $(".health")).map((d) => d.textContent)).toEqual([
+      "2 sends have had no delivery receipt long after they went out. The provider's events may not be reaching this app, so its bounces suppress no one and its complaints unsubscribe no one.",
+    ]);
+    expect($("a", $(".health")).getAttribute("href")).toBe("#/sent");
+  });
+
+  it("shows the first-run checklist when nothing is written yet, and its New post creates one", async () => {
+    fake = world([], sendServer(), none, [
+      {
+        method: "POST",
+        path: "/api/posts",
+        reply: () => ({ post: { id: "p9" }, revision_id: "r" }),
+      },
+    ]);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect($(".setup-title").textContent).toBe("Set up your publication");
+    expect(document.querySelector(".tiles")).toBeNull();
+    expect($(".setup-url").textContent).toBe("https://app.birds.example/subscribe");
+    expect($(".setup [data-nav='#/settings']").textContent).toBe("Settings");
+    expect($(".pub-links a").textContent?.trim()).toBe("Connect Claude →");
+    $(".setup [data-act='new-post']").click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fake.calls.find((c) => c.method === "POST")?.body).toBe("{}");
+    expect(location.hash).toBe("#/edit/p9");
+  });
+
+  it("offers bringing an existing list as an optional step a fresh publication skips", async () => {
+    fake = world([], sendServer(), none);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    const step = $(".setup-list");
+    expect(step.classList.contains("setup-todo")).toBe(true);
+    expect($("strong", step).textContent).toBe("Bring your existing list");
+    expect($(".setup-hint", step).textContent).toBe("Optional.");
+    expect($("button", step).dataset.nav).toBe("#/subscribers/import");
+    expect($("button", step).textContent).toBe("Import");
+    expect(fake.unhandled).toEqual([]);
+  });
+
+  it("keeps the checklist after an import until the first post, the list folded as done", async () => {
+    // The first-run page ends at the first post, not the first subscriber, so the steps
+    // after bringing a list in stay on screen.
+    fake = world([], sendServer(), counts);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect($(".setup-title").textContent).toBe("Set up your publication");
+    expect(document.querySelector(".tiles")).toBeNull();
+    expect(document.querySelector(".setup-list")).toBeNull();
+    expect($(".setup-fold").textContent).toBe("✓3 done");
+    // Shown, it's in its place in the list. Confirmed and pending: the people a send can
+    // reach once they confirm.
+    $(".setup-fold").click();
+    expect($(".setup-list .setup-hint").textContent).toBe("43 subscribers on your list.");
+    expect(document.querySelector(".setup [data-act='new-post']")).not.toBeNull();
+    expect(fake.unhandled).toEqual([]);
+  });
+
+  it("keeps offering the import while no one on the list can be sent to", async () => {
+    // Only confirmed and pending subscribers count: an import that brought in only people
+    // who left or bounced leaves the step open, since a send would reach no one.
+    fake = world([], sendServer(), { pending: 0, confirmed: 0, unsubscribed: 12, suppressed: 3 });
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    const step = $(".setup-list");
+    expect(step.classList.contains("setup-done")).toBe(false);
+    expect($("button", step).dataset.nav).toBe("#/subscribers/import");
+    expect(fake.unhandled).toEqual([]);
+  });
+
+  // SPEC §13, DESIGN §4: a deployment with no provider connected says so where the
+  // developer lands, as a standing state, and its checklist puts connecting one first.
+  // The steps shown: those left, while the done ones are hidden.
+  const steps = () => $$(".setup-steps li strong").map((s) => s.textContent);
+  describe("while no email provider is connected", () => {
+    const withProvider = (provider: "none" | "fake" | "ses") => {
+      const c = config();
+      c.deployment = { ...c.deployment, provider };
+      appState.appConfig = c;
+    };
+    it("puts connecting it first, and every step that sends after it, in plain words", async () => {
+      withProvider("none");
+      fake = world([], sendServer(), none);
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(steps()).toEqual([
+        "Connect Amazon SES",
+        "Send a test email",
+        "Get notified",
+        "Request production access",
+        "Bring your existing list",
+        "Write your first post",
+        "Schedule your first post",
+        "Send a test email for your first post",
+        "Share your subscribe link",
+      ]);
+      expect($(".setup-connect button").dataset.nav).toBe("#/docs/ses");
+      expect($(".setup-connect button").textContent).toBe("Connect");
+      expect($(".setup-test .setup-hint").textContent).toBe("After Connect Amazon SES");
+      expect($(".setup-share .setup-hint").textContent).toBe("After Send a test email");
+      expect(document.querySelector(".setup-url")).toBeNull();
+      expect(document.querySelector(".setup-share [data-copy]")).toBeNull();
+      expect(fake.unhandled).toEqual([]);
+    });
+
+    it("raises an amber line in the health block on a populated dashboard, linking to connect one", async () => {
+      withProvider("none");
+      // A listed post has gone out, so setup is finished and the health block says it.
+      fake = world([post()], sendServer([send()]), counts);
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      // In the health block's own warning treatment (DESIGN §4), with nothing wrong on a send.
+      const block = $("#dashHealth .health");
+      expect(block.classList.contains("amber")).toBe(true);
+      const line = $(".dash-not-connected", block);
+      expect(line.textContent).toBe(
+        "No email provider connected, so nothing can be sent yet. Connect Amazon SES to start sending.",
+      );
+      expect($<HTMLAnchorElement>("a", line).getAttribute("href")).toBe("#/docs/ses");
+      expect(line.querySelector("button")).toBeNull(); // a standing line: nothing to dismiss
+      expect(fake.unhandled).toEqual([]);
+    });
+
+    it("says it once while setup is open: the Finish setting up card's Connect step, not a health line", async () => {
+      withProvider("none");
+      fake = world([post()], sendServer(), counts);
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect($(".setup-card .setup-title").textContent).toBe("Finish setting up");
+      expect($(".setup-card .setup-connect button").textContent).toBe("Connect");
+      expect(document.querySelector("#dashHealth .health")).toBeNull();
+      expect(fake.unhandled).toEqual([]);
+    });
+
+    it("says a scheduled send will be held, beside the countdown it keeps", async () => {
+      withProvider("none");
+      fake = world([post()], sendServer([scheduled()]), counts);
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      const card = $("#dashScheduled .sched-card[data-post='p2']");
+      expect(countdown("p2").textContent).toMatch(/^Sends in/);
+      expect($(".sched-held", card).textContent).toBe(
+        "Will be held: no email provider is connected.",
+      );
+      expect(fake.unhandled).toEqual([]);
+    });
+
+    // A held send is the deployment's state showing on a send: one line, not two.
+    const held = (id: string, subject: string) =>
+      sending({
+        id,
+        subject,
+        c_pending: 40,
+        halt_reason: "account",
+        halt_cause: "not_connected",
+        halt_error: "no email provider is connected",
+        halted_at: NOW - 60_000,
+      });
+    it("says a held send and the state that holds it in one red line, the fix a link", async () => {
+      withProvider("none");
+      fake = world([post()], sendServer([held("h1", "Swifts")]), counts);
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      const block = $("#dashHealth .health");
+      expect(block.classList.contains("red")).toBe(true);
+      expect($$(":scope > div > div", block).map((d) => d.textContent)).toEqual([
+        "No email provider connected, so nothing can be sent and Swifts is held, with no one marked unsent; it goes out at its first retry once one is connected. Connect Amazon SES, then deploy.",
+      ]);
+      const links = $$<HTMLAnchorElement>("a", block).map((a) => a.getAttribute("href"));
+      expect(links).toEqual(["#/sent/h1", "#/docs/ses"]);
+      expect(fake.unhandled).toEqual([]);
+    });
+
+    it("counts several held sends, and in the local preview names the restart instead", async () => {
+      withProvider("none");
+      appState.appConfig!.deployment.not_connected_preview = true; // SIMULATE_SENDS=not-connected
+      fake = world([post()], sendServer([held("h1", "Swifts"), held("h2", "Terns")]), counts);
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect($(".dash-not-connected").textContent).toBe(
+        "No email provider connected, so nothing can be sent and 2 sends are held, with no one marked unsent; they go out at their first retry once one is connected. Restart npm run dev without SIMULATE_SENDS=not-connected to send.",
+      );
+      expect($("#dashHealth .health a").getAttribute("href")).toBe("#/sent");
+      expect($$("#dashHealth .health > div > div")).toHaveLength(1);
+      expect(fake.unhandled).toEqual([]);
+    });
+
+    it("shows neither once a provider is set, nor on local development's stand-in", async () => {
+      for (const provider of ["ses", "fake"] as const) {
+        withProvider(provider);
+        const status: FakeRoute[] = [{ path: "/api/provider", reply: () => providerStatus() }];
+        fake = world([], sendServer(), none, status);
+        await mount(renderDashboard);
+        await vi.advanceTimersByTimeAsync(0);
+        // SES is read, and email is working; local development's stand-in can't say.
+        expect(steps(), provider).toEqual([
+          ...(provider === "ses" ? [] : ["Send a test email"]),
+          "Get notified",
+          // Only SES has an account whose sandbox AWS reviews (SPEC §13).
+          ...(provider === "ses" ? ["Request production access"] : []),
+          "Bring your existing list",
+          "Write your first post",
+          "Schedule your first post",
+          "Send a test email for your first post",
+          "Share your subscribe link",
+        ]);
+        // SES offers the link only once it reads as granted production access, which an
+        // account not yet read doesn't; the stand-in has no sandbox to wait for.
+        expect(document.querySelector(".setup-url")?.textContent ?? null, provider).toBe(
+          provider === "ses" ? null : "https://app.birds.example/subscribe",
+        );
+        unmount();
+        fake.restore();
+        fake = world([post()], sendServer([scheduled()]), counts, status);
+        await mount(renderDashboard);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(document.querySelector(".dash-not-connected"), provider).toBeNull();
+        expect(document.querySelector(".sched-held"), provider).toBeNull();
+        expect(document.querySelector("#dashHealth .health"), provider).toBeNull();
+        unmount();
+        fake.restore();
+      }
+    });
+  });
+
+  // DESIGN §3: setup's steps stay reachable after the first post, until a post listed in the
+  // archive is published (SPEC §5).
+  describe("Finish setting up", () => {
+    const card = () => document.querySelector(".setup-card");
+
+    it("carries the same steps as the first-run checklist once a draft exists, under the health block", async () => {
+      fake = world([post()], sendServer(), none);
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect($(".setup-card .setup-title").textContent).toBe("Finish setting up");
+      expect($(".setup-card .setup-fold").textContent).toBe("✓3 done");
+      expect($$(".setup-card .setup-steps li strong").map((s) => s.textContent)).toEqual([
+        "Send a test email",
+        "Get notified",
+        "Bring your existing list",
+        "Schedule your first post",
+        "Send a test email for your first post",
+        "Share your subscribe link",
+      ]);
+      expect($("#dashSetup").previousElementSibling?.id).toBe("dashHealth");
+      expect(document.querySelector(".tiles")).not.toBeNull(); // the regular dashboard
+      // One Primary per view: the head's New post. The card has none.
+      expect($$("#dash button.primary").map((b) => b.textContent)).toEqual(["New post"]);
+      expect(fake.unhandled).toEqual([]);
+    });
+
+    it("reads each step from what both clients can read: notifications, the first post's scheduled send, and its test", async () => {
+      // An email-only send, such as Verify it works', counts for nothing: neither the first
+      // post nor its schedule.
+      const srv = sendServer([scheduled()]);
+      srv.put(send(), { email_only: true });
+      appState.appConfig!.settings.notifications = {
+        to: ["kurt@birds.example", "ed@birds.example"],
+      };
+      fake = world([post()], srv, counts);
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect($(".setup-card .setup-fold").textContent).toBe("✓6 done");
+      expect(document.querySelector(".setup-card .setup-schedule")).toBeNull();
+      // The test that counts is the scheduled send's, the frozen email: it opens the post.
+      expect($(".setup-card .setup-post-test .setup-hint").textContent).toMatch(
+        /^“Gulls” goes out .+\. Send yourself a test of it first\.$/,
+      );
+      expect($(".setup-card .setup-post-test button").dataset.nav).toBe("#/edit/p2");
+      // A reader who shows the done steps sees them in place, and keeps them through the
+      // repaint after a test of the post, sent from the post, ticks it on the next read.
+      $(".setup-card .setup-fold").click();
+      expect($(".setup-card .setup-fold").getAttribute("aria-expanded")).toBe("true");
+      expect(document.activeElement).toBe($(".setup-card .setup-fold"));
+      expect($(".setup-card .setup-schedule").classList.contains("setup-done")).toBe(true);
+      srv.edit("x2", { tested_at: Date.now() });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect($(".setup-card .setup-post-test").classList.contains("setup-done")).toBe(true);
+      expect($(".setup-card .setup-fold").textContent).toBe("✓7 done");
+      expect($(".setup-card .setup-fold").getAttribute("aria-expanded")).toBe("true");
+      // The repaint replaced the toggle, and focus came back to it.
+      expect(document.activeElement).toBe($(".setup-card .setup-fold"));
+      // Hidden again, only what's left shows.
+      $(".setup-card .setup-fold").click();
+      expect(document.querySelector(".setup-card .setup-post-test")).toBeNull();
+      expect(fake.unhandled).toEqual([]);
+    });
+
+    it("says a failed notification in the health block, with Get notified pointing up at it (SPEC §8)", async () => {
+      appState.appConfig!.settings.notifications = { to: ["kurt@birds.example"] };
+      appState.appConfig!.notification_status = {
+        last_sent: null,
+        last_failure: {
+          kind: "test",
+          subject: "",
+          at: NOW - 1000,
+          error: "Email Routing refused it",
+        },
+      };
+      fake = world([post()], sendServer(), counts);
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect($("#dashHealth .health").classList.contains("amber")).toBe(true);
+      expect($(".dash-notify-failed").textContent).toBe(
+        "Lettre’s last notification didn’t arrive: Email Routing refused it. Check Settings → Notifications.",
+      );
+      expect($<HTMLAnchorElement>(".dash-notify-failed a").getAttribute("href")).toBe("#/settings");
+      const step = $(".setup-card .setup-notify");
+      expect(step.classList.contains("setup-attention")).toBe(true);
+      expect($(".setup-hint", step).textContent).toBe(
+        "The last notification didn’t arrive. See why above.",
+      );
+      expect(fake.unhandled).toEqual([]);
+    });
+
+    it("keeps a failed notification's health line once setup is done", async () => {
+      appState.appConfig!.notification_status = {
+        last_sent: null,
+        last_failure: { kind: "finished", subject: "Waxwings", at: NOW - 1000, error: "refused." },
+      };
+      fake = world([post()], sendServer([send()]), counts);
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(document.querySelector(".setup-card")).toBeNull();
+      expect($(".dash-notify-failed").textContent).toBe(
+        "Lettre’s last notification didn’t arrive: refused. Check Settings → Notifications.",
+      );
+      expect(fake.unhandled).toEqual([]);
+    });
+
+    it("stays while the only sends are email only, so Verify it works' test send doesn't end setup", async () => {
+      const srv = sendServer();
+      srv.put(send(), { email_only: true });
+      fake = world([post({ status: "sent" })], srv, counts);
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(card()).not.toBeNull();
+      expect($(".setup-card .setup-title").nextElementSibling?.textContent).toBe(
+        "This card stays until your first post goes out to the archive. Email-only sends don’t count.",
+      );
+      expect(fake.unhandled).toEqual([]);
+    });
+
+    it("follows the archive on each load: unlisting the only listed post reopens setup, and listing it closes setup again (SPEC §5)", async () => {
+      const srv = sendServer([send({ id: "x1" })]);
+      fake = world([post({ status: "sent" })], srv, counts);
+      const load = async () => {
+        unmount();
+        await mount(renderDashboard);
+        await vi.advanceTimersByTimeAsync(0);
+      };
+      await load();
+      expect(card()).toBeNull();
+      srv.edit("x1", {}, { email_only: true });
+      await load();
+      expect(card()).not.toBeNull();
+      srv.edit("x1", {}, { email_only: false });
+      await load();
+      expect(card()).toBeNull();
+      expect(fake.unhandled).toEqual([]);
+    });
+
+    it("clears once a post listed in the archive has started sending, and doesn't come back on a later read", async () => {
+      const srv = sendServer([scheduled({ fire_at: NOW + 30_000 })]);
+      fake = world([post({ status: "scheduled" })], srv, counts);
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(card()).not.toBeNull();
+      // The sweep starts it: published, so the archive shows its first post.
+      srv.edit("x2", { status: "sending", started_at: Date.now(), c_pending: 40 });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(card()).toBeNull();
+      expect(fake.unhandled).toEqual([]);
+    });
+  });
+
+  it("marks an email-only post in the Sent table, and links its web version rather than the archive", async () => {
+    const srv = sendServer();
+    srv.put(send(), { email_only: true, archive: "https://birds.example/archive/waxwings" });
+    srv.put(send({ id: "x4", post_id: "p5", subject: "Wrens" }));
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    const quiet = $("tr[data-send='x1']");
+    expect($(".email-only-mark", quiet).textContent?.trim()).toBe("Email only");
+    expect($(".ghost-link", quiet).textContent).toBe("Web version\u00a0↗");
+    const listed = $("tr[data-send='x4']");
+    expect(listed.querySelector(".email-only-mark")).toBeNull();
+    expect($(".ghost-link", listed).textContent).toBe("Archive\u00a0↗");
+    expect(fake.unhandled).toEqual([]);
+  });
+
+  it("marks an email-only post's scheduled card, and only that one", async () => {
+    const srv = sendServer();
+    srv.put(scheduled(), { email_only: true });
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect($("#dashScheduled .sched-card .sched-email-only").textContent).toBe("Email only");
+    expect(fake.unhandled).toEqual([]);
+  });
+
+  it("marks an email-only draft beside its title, and only that one (DESIGN §2)", async () => {
+    fake = world([post(), post({ id: "p2", subject: "Wrens", email_only: true })], sendServer());
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    const label = (id: string) =>
+      document.querySelector(`tr[data-id='${id}'] .email-only-mark`)?.textContent?.trim() ?? null;
+    expect(label("p2")).toBe("Email only");
+    expect(label("p1")).toBeNull();
+    expect(fake.unhandled).toEqual([]);
+  });
+
+  it("opens the post from a draft row or a scheduled card, the record from a sent row, and the watch from the active card", async () => {
+    fake = world([post()], sendServer([send(), scheduled(), sending({ c_accepted: 50 })]));
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    $("tr[data-id='p1'] td:last-child").click();
+    expect(location.hash).toBe("#/edit/p1");
+    $("tr[data-send='x1'] td:nth-child(2)").click();
+    expect(location.hash).toBe("#/sent/x1");
+    $("#dashScheduled .sched-card .muted").click();
+    expect(location.hash).toBe("#/edit/p2");
+    $("#dashActive .active-card .active-stat").click();
+    expect(location.hash).toBe("#/sent/x3");
+  });
+
+  it("moves a send that starts and finishes between two reads straight from the queue to the Sent table, within one read", async () => {
+    const srv = sendServer([
+      scheduled(),
+      scheduled({ id: "x3", post_id: "p4", subject: "Swifts", fire_at: NOW - 5_000 }),
+    ]);
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cards()).toEqual(["p4", "p2"]);
+    expect($("#dashSent").textContent).toMatch(/No sends yet/);
+    const before = listReads(fake).length;
+    await vi.advanceTimersByTimeAsync(3000); // due: the server asks for a read every 3 s
+    expect(feedReads(fake)).toHaveLength(2);
+    expect(listReads(fake).length).toBe(before); // nothing moved, nothing re-read
+    // The tick starts it and it finishes dispatch before the next read: one change, due to sent.
+    srv.edit("x3", { status: "sent", c_accepted: 50, completed_at: Date.now() });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(cards()).toEqual(["p2"]);
+    const row = $("#dashSent tr[data-send='x3']");
+    expect($(".badge", row).textContent).toBe("sent");
+    expect($("a", row).getAttribute("href")).toBe("#/sent/x3");
+    expect($$(".dash-head")).toHaveLength(1); // repainted in place, no full re-render
+    expect(fake.unhandled).toEqual([]);
+  });
+
+  it("reads about once a minute while nothing moves, and once just past the next fire time", async () => {
+    // Off the minute grid, so only the read the server arms for just past the fire time can
+    // see the send due: a read once a minute would land half a minute either side of it.
+    const fire = NOW + 5 * 60_000 + 30_000;
+    fake = world([post()], sendServer([scheduled({ fire_at: fire })]));
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    const lists = listReads(fake).length;
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(feedReads(fake)).toHaveLength(6); // the first, then one a minute
+    expect(listReads(fake)).toHaveLength(lists); // nothing changed, nothing re-read
+    await vi.advanceTimersByTimeAsync(fire + 999 - Date.now());
+    expect(feedReads(fake)).toHaveLength(6);
+    expect(listReads(fake)).toHaveLength(lists);
+    // A second past the fire time: that read sees the send due and re-reads the queue.
+    await vi.advanceTimersByTimeAsync(1);
+    expect(feedReads(fake)).toHaveLength(7);
+    expect(listReads(fake)).toHaveLength(lists + 1);
+    expect(countdown("p2").textContent).toBe("Preparing to send…");
+  });
+
+  it("shows the other client's cancel, move, new schedule, and re-make of far-off sends within one idle read", async () => {
+    const far = NOW + 2 * 86_400_000;
+    const srv = sendServer([
+      scheduled({ fire_at: far }),
+      scheduled({ id: "x5", post_id: "p5", subject: "Terns", fire_at: far + 3_600_000 }),
+    ]);
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cards()).toEqual(["p2", "p5"]);
+    // Claude moves one a day later, which changes no stage.
+    srv.edit("x5", { fire_at: NOW + 3 * 86_400_000 });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(countdown("p5").textContent).toBe("Sends in 3 days");
+    // Then cancels the other.
+    srv.edit("x2", { status: "canceled" });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(cards()).toEqual(["p5"]);
+    // Then schedules another, and a template change re-makes every scheduled send.
+    srv.put(scheduled({ id: "x6", post_id: "p6", subject: "Rails", fire_at: far }));
+    srv.edit("x5", { remade_at: Date.now() });
+    srv.edit("x6", { remade_at: Date.now() });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(cards()).toEqual(["p6", "p5"]);
+    expect(
+      $$("#dashScheduled .sched-remade-mark").map(
+        (m) => m.closest<HTMLElement>(".sched-card")?.dataset.post,
+      ),
+    ).toEqual(["p6", "p5"]);
+    expect(fake.unhandled).toEqual([]);
+  });
+
+  it("keeps a refused send's red line live, and clears it when the refusal lifts", async () => {
+    const srv = sendServer([sending({ c_pending: 50 })]);
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(document.querySelector(".health")).toBeNull();
+    expect($("#dashActive .active-card").dataset.watch).toBe("x3");
+    srv.edit(
+      "x3",
+      {
+        halt_reason: "account",
+        halt_cause: "quota",
+        halt_error: "ses 429 TooManyRequestsException: Daily message quota exceeded.",
+        halted_at: Date.now(),
+      },
+      { phase: "needs_attention" },
+    );
+    await vi.advanceTimersByTimeAsync(3000);
+    expect($(".health.red").textContent).toMatch(
+      /Swifts: The provider is refusing the account: ses 429/,
+    );
+    // The provider's words end in a period already: the line adds none of its own.
+    expect($(".health.red").textContent).toMatch(/quota exceeded\. SES’s 24-hour quota/);
+    expect($(".health a").getAttribute("href")).toBe("#/sent/x3");
+    expect(document.querySelector("#dashActive .active-card")).toBeNull(); // reported once
+    await vi.advanceTimersByTimeAsync(9000);
+    expect($(".health.red").textContent).toMatch(/Daily message quota/); // it stays
+    // The retry got through.
+    srv.edit("x3", { halt_reason: null, halt_cause: null, halt_error: null, halted_at: null });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(document.querySelector(".health")).toBeNull();
+    expect($("#dashActive .active-card").dataset.watch).toBe("x3");
+  });
+
+  it("keeps a wedged send's red line until Resolve lets it finish, then shows it sent", async () => {
+    const srv = sendServer();
+    srv.put(sending({ id: "w1", subject: "Kinglets", c_accepted: 99, c_in_flight: 1 }), {
+      phase: "needs_attention",
+      conditions: [condition.wedged(1, "w1")],
+    });
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect($(".health.red").textContent).toBe(
+      "⚠️Kinglets has 1 ambiguous delivery awaiting a decision; resolve it on its page.",
+    );
+    // A wedged send moves only when someone resolves it: the layer reads at the idle pace,
+    // not every few seconds, and the line stays.
+    const reads = feedReads(fake).length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(feedReads(fake).length - reads).toBe(1);
+    expect($(".health.red a").getAttribute("href")).toBe("#/sent/w1");
+    // Resolve, on the send's page (another tab): shown within the minute.
+    srv.edit("w1", { status: "sent", c_in_flight: 0, c_unsent: 1, completed_at: Date.now() });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(document.querySelector(".health")).toBeNull();
+    expect($("#dashSent tr[data-send='w1'] .badge").textContent).toBe("sent");
+  });
+
+  it("follows a settling send's receipts in its Delivered cell, to the last one", async () => {
+    const srv = sendServer([
+      send({ completed_at: NOW - 10_000, c_accepted: 90, c_delivered: 10, c_bounced: 0 }),
+    ]);
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    const cell = () => $("#dashSent tr[data-send='x1'] td.delivered").textContent;
+    expect(cell()).toBe("10");
+    const before = listReads(fake).length;
+    srv.edit("x1", { c_accepted: 40, c_delivered: 60 });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(cell()).toBe("60");
+    expect(listReads(fake).length).toBe(before); // the counts came with the layer's read
+    srv.edit("x1", { c_accepted: 0, c_delivered: 98, c_bounced: 2 }); // the last receipt
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(cell()).toBe("982 bounced");
+    // Complete: back to the idle pace, one read a minute.
+    const reads = feedReads(fake).length;
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(feedReads(fake).length - reads).toBe(10);
+    // A receipt long after dispatch still shows, within the minute.
+    srv.edit("x1", { c_delivered: 97, c_bounced: 3 });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(cell()).toBe("973 bounced");
+  });
+
+  it("keeps a sending send's Delivered in the Sent table in step with its active-send card", async () => {
+    const srv = sendServer([sending({ c_pending: 60, c_accepted: 40 })]);
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect($("#dashSent tr[data-send='x3'] td.delivered").textContent).toBe("0");
+    srv.edit("x3", { c_accepted: 6, c_delivered: 34 });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect($("#dashSent tr[data-send='x3'] td.delivered").textContent).toBe("34");
+    expect($("#dashActive .active-stat").textContent).toMatch(/34 confirmed/);
+  });
+
+  it("reads the page again and follows from that read when its cursor is ahead of the database", async () => {
+    const srv = sendServer([sending({ c_pending: 60, c_accepted: 40 })]);
+    srv.aheadOnce(); // a local reset
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listReads(fake)).toHaveLength(2); // its own read, then again after the refusal
+    expect(feedReads(fake)).toHaveLength(2); // refused, then from the fresh read
+    expect($$(".dash-head")).toHaveLength(1);
+    srv.edit("x3", { c_accepted: 6, c_delivered: 34 });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect($("#dashSent tr[data-send='x3'] td.delivered").textContent).toBe("34"); // following again
+    expect(fake.unhandled).toEqual([]);
+  });
+
+  it("stops reading when the reader navigates away", async () => {
+    fake = world([post()], sendServer([sending()]));
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(feedReads(fake)).toHaveLength(2);
+    unmount(); // what navigating away does: the layer's follower leaves with the mount
+    await vi.advanceTimersByTimeAsync(9000);
+    expect(feedReads(fake)).toHaveLength(2);
+  });
+
+  it("marks each scheduled card the server reports as re-made since its last test, until a test lands (SPEC §8)", async () => {
+    const srv = sendServer([
+      scheduled({ remade_at: NOW - 500 }),
+      scheduled({ id: "x4", post_id: "p5", fire_at: NOW + 120_000, remade_at: NOW - 500 }),
+      scheduled({ id: "x5", post_id: "p6", fire_at: NOW + 180_000 }),
+    ]);
+    fake = world([post()], srv);
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    const marked = () =>
+      $$("#dashScheduled .sched-remade-mark").map(
+        (m) => m.closest<HTMLElement>(".sched-card")?.dataset.post,
+      );
+    expect(marked()).toEqual(["p2", "p5"]);
+    expect($("#dashScheduled .sched-remade-mark").textContent).toBe(
+      "Look changed since your last test",
+    );
+    srv.edit("x4", { tested_at: Date.now() }); // a test of the re-made copy, sent from the post
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(marked()).toEqual(["p2"]);
+  });
+
+  it("quick actions: add a subscriber, edit the publication, copy an origin", async () => {
+    const writeText = stubClipboard();
+    fake = world([post()], sendServer());
+    await mount(renderDashboard);
+    await vi.advanceTimersByTimeAsync(0);
+    $(".quick-actions [data-act='add-sub']").click();
+    expect($("#addEmail")).toBeTruthy();
+    $("#aCancel").click();
+    $(".quick-actions [data-nav]").click();
+    expect(location.hash).toBe("#/settings");
+    $(".pub-card [data-copy]").click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(writeText).toHaveBeenCalledWith("https://app.birds.example");
+    // Said on the button, not in a toast.
+    expect($(".pub-card [data-copy]").getAttribute("aria-label")).toBe("Copied");
+    expect($("#toasts").textContent).toBe("");
+  });
+  // SPEC §13: on SES, the dashboard says where the connection stands, from GET /api/provider.
+  describe("the SES connection", () => {
+    const onSes = (status: Parameters<typeof providerStatus>[0]): FakeRoute[] => {
+      const c = config();
+      c.deployment = { ...c.deployment, provider: "ses" };
+      appState.appConfig = c;
+      return [{ path: "/api/provider", reply: () => providerStatus(status) }];
+    };
+    const sandbox = { state: "sandbox", unknown_reason: null } as const;
+
+    it("waits on AWS while it reviews, and says to wait to schedule and share, never blocking them", async () => {
+      fake = world([], sendServer(), none, onSes({ ...sandbox, review: "pending" }));
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect($(".setup-access").classList.contains("setup-waiting")).toBe(true);
+      expect($(".setup-access .setup-hint").textContent).toBe(
+        "Waiting for AWS to grant production access.",
+      );
+      expect($(".setup-access button").dataset.nav).toBe("#/docs/production-access");
+      expect($(".setup-schedule").classList.contains("setup-blocked")).toBe(false);
+      expect($(".setup-schedule .setup-hint").textContent).toBe(
+        "Best after AWS grants access: until then it reaches only verified addresses.",
+      );
+      expect($(".setup-share").classList.contains("setup-blocked")).toBe(false);
+      expect($(".setup-share .setup-hint").textContent).toBe(
+        "Share it once AWS grants production access.",
+      );
+      expect(fake.unhandled).toEqual([]);
+    });
+
+    it("says AWS has replied in its case, never that it denied production access", async () => {
+      fake = world(
+        [],
+        sendServer(),
+        none,
+        onSes({ ...sandbox, review: "denied", review_case: "1234567890" }),
+      );
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect($(".setup-access .setup-hint").textContent).toBe(
+        "AWS hasn’t granted it yet. It has replied in AWS Support, case 1234567890: answer there.",
+      );
+    });
+
+    it("raises a red line for a warning that stops every email (SPEC §13)", async () => {
+      fake = world(
+        [post()],
+        sendServer([send()]),
+        counts,
+        onSes({
+          state: "production",
+          unknown_reason: null,
+          warnings: [
+            {
+              code: "key_rejected",
+              severity: "error",
+              message: "Amazon SES rejects Lettre’s AWS key, so no email can go out.",
+              docs: { slug: "ses", anchor: "5-create-the-apps-aws-key" },
+            },
+          ],
+        }),
+      );
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect($("#dashHealth .health").classList.contains("red")).toBe(true);
+      expect($(".dash-provider-warning").textContent).toBe(
+        "Amazon SES rejects Lettre’s AWS key, so no email can go out. Create the app’s AWS key",
+      );
+    });
+
+    it("folds the step away once AWS grants production access", async () => {
+      fake = world([], sendServer(), none, onSes({ state: "production", unknown_reason: null }));
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(document.querySelector(".setup-access")).toBeNull();
+      $(".setup-fold").click();
+      expect($(".setup-access").classList.contains("setup-done")).toBe(true);
+      expect($(".setup-access .setup-hint").textContent).toBe("AWS granted it.");
+      expect($(".setup-share .setup-hint").textContent).toBe(
+        "Share it before your first post goes out, so readers get it.",
+      );
+    });
+
+    it("never checks the step off while the app can't tell, nor says it's in the sandbox", async () => {
+      fake = world([], sendServer(), none, onSes({ unknown_reason: "permission" }));
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect($(".setup-access").classList.contains("setup-todo")).toBe(true);
+      expect($(".setup-access .setup-hint").textContent).toBe(
+        "Lettre can’t read your SES account, so the SES console’s account dashboard says whether AWS granted it.",
+      );
+      // Nor offers the link, since it can't tell whether AWS granted access.
+      expect($(".setup-share .setup-hint").textContent).toBe(
+        "Share it once AWS grants production access.",
+      );
+      expect(document.querySelector(".setup-share [data-copy]")).toBeNull();
+    });
+
+    it("suggests naming the publication before asking AWS, without blocking the step", async () => {
+      appState.appConfig = config();
+      const routes = onSes(sandbox);
+      appState.appConfig.settings.publication = {
+        name: "",
+        tagline: "",
+        address: "",
+        logo_url: "",
+      };
+      fake = world([], sendServer(), none, routes);
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect($(".setup-access").classList.contains("setup-todo")).toBe(true);
+      expect($(".setup-access .setup-hint").textContent).toBe(
+        "Name your publication first: AWS’s reviewer looks at it.",
+      );
+    });
+
+    it("shows the same health block on first run, and the test step only points up at it (SPEC §8, §13)", async () => {
+      fake = world(
+        [],
+        sendServer(),
+        none,
+        onSes({
+          ...sandbox,
+          sending: {
+            state: "refusing",
+            since: 1,
+            last_accepted: null,
+            refusal: {
+              cause: "configuration",
+              found_by: "account_check",
+              error: "SES has no configuration set named lettre-mail-missing.",
+              advice: "Fix the secret.",
+              at: 1,
+            },
+          },
+          signups: "paused",
+        }),
+      );
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect($("#dashHealth").nextElementSibling?.id).toBe("dashSetup");
+      expect($("#dashHealth .health").classList.contains("red")).toBe(true);
+      expect($(".dash-not-going-out").textContent).toMatch(/^Email isn’t going out/);
+      const step = $(".setup-test");
+      expect(step.classList.contains("setup-attention")).toBe(true);
+      expect($(".setup-hint", step).textContent).toBe("SES is refusing. See why above.");
+      // The sandbox is the access step's to say while setup is open.
+      expect(document.querySelector(".dash-sandbox")).toBeNull();
+      expect(fake.unhandled).toEqual([]);
+    });
+
+    it("says email isn't going out in one red line, with SES's words, the fix, and a test, standing for the errors that say the same (SPEC §8, §13)", async () => {
+      fake = world(
+        [post()],
+        sendServer([send()]),
+        counts,
+        onSes({
+          state: "production",
+          unknown_reason: null,
+          warnings: [
+            {
+              code: "configuration_set_missing",
+              severity: "error",
+              message: "SES has no configuration set by that name.",
+              docs: { slug: "ses", anchor: "4-send-bounces-and-complaints-to-the-app" },
+            },
+          ],
+          sending: {
+            state: "refusing",
+            since: 1,
+            last_accepted: null,
+            refusal: {
+              cause: "configuration",
+              found_by: "test",
+              error: "ses 404 NotFoundException: Configuration set <x> does not exist",
+              advice: "Fix the set.",
+              at: 1,
+            },
+          },
+          signups: "paused",
+        }),
+      );
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect($("#dashHealth .health").classList.contains("red")).toBe(true);
+      expect($(".dash-not-going-out").textContent).toBe(
+        "Email isn’t going out, and signups are paused. SES says: ses 404 NotFoundException: Configuration set <x> does not exist. Fix the set. Then send a test email: once SES takes one, signups reopen.",
+      );
+      expect($<HTMLAnchorElement>(".dash-not-going-out a").getAttribute("href")).toBe("#/template");
+      expect(document.querySelector(".dash-provider-warning")).toBeNull();
+      expect(fake.unhandled).toEqual([]);
+    });
+
+    it("raises an amber line for the sandbox once setup is done, and one for each warning, in the server's words", async () => {
+      const warning = {
+        code: "bounces_not_routed",
+        severity: "warn",
+        message: "Bounces and complaints won’t reach Lettre.",
+        docs: { slug: "ses", anchor: "4-send-bounces-and-complaints-to-the-app" },
+      } as const;
+      fake = world(
+        [post()],
+        sendServer([send()]),
+        counts,
+        onSes({ ...sandbox, warnings: [warning] }),
+      );
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect($("#dashHealth .health").classList.contains("amber")).toBe(true);
+      expect($(".dash-sandbox").textContent).toBe(
+        "Amazon SES is still in the sandbox, so it mails only addresses verified in SES. Request production access",
+      );
+      expect($(".dash-provider-warning").textContent).toBe(
+        "Bounces and complaints won’t reach Lettre. Send bounces and complaints to the app",
+      );
+      expect($<HTMLAnchorElement>(".dash-provider-warning a").getAttribute("href")).toBe(
+        "#/docs/ses/4-send-bounces-and-complaints-to-the-app",
+      );
+    });
+
+    it("leaves the sandbox line to the setup card while the card says it", async () => {
+      fake = world([post()], sendServer(), counts, onSes(sandbox));
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(document.querySelector(".setup-access")).not.toBeNull();
+      expect(document.querySelector(".dash-sandbox")).toBeNull();
+    });
+
+    it("shows the dashboard as before when the connection can't be read", async () => {
+      const c = config();
+      c.deployment = { ...c.deployment, provider: "ses" };
+      appState.appConfig = c;
+      fake = world([post()], sendServer([send()]), counts, [
+        { path: "/api/provider", reply: () => new Response("down", { status: 500 }) },
+      ]);
+      await mount(renderDashboard);
+      await vi.advanceTimersByTimeAsync(0);
+      expect($(".dash-head h1").textContent).toBe("Birds Weekly");
+      expect(document.querySelector("#dashHealth .health")).toBeNull();
+    });
+  });
+});

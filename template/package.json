@@ -1,0 +1,26 @@
+{
+  "name": "newsletter",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "lettre dev",
+    "seed": "lettre seed",
+    "reset": "lettre reset",
+    "sync-migrations": "lettre sync-migrations",
+    "check-context": "lettre check-context",
+    "typecheck": "wrangler types && tsc"
+  },
+  "dependencies": {
+    "@letretro/lettre": "0.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "0.0.0",
+    "typescript": "0.0.0",
+    "wrangler": "0.0.0"
+  },
+  "allowScripts": {
+    "esbuild": true,
+    "fsevents": true,
+    "workerd": true
+  }
+}

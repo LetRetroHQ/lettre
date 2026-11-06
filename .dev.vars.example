@@ -1,0 +1,65 @@
+# Copy to `.dev.vars` (gitignored) for local development: `npm run dev` reads it, and
+# nothing in it is ever deployed. It holds only what local development uses. A deployed
+# environment's secrets (Access, and the email provider's keys) are stored with
+# `npx wrangler secret put NAME --env production` instead; the Configuration reference
+# lists them: https://github.com/LetRetroHQ/lettre/blob/main/docs/reference/01-configuration.md#secrets
+# Restart `npm run dev` after a change.
+
+# --- Admin API auth ---
+# Local dev authenticates with a JWT signed by DEV_AUTH_SECRET (the app verifies it
+# via the same "verify token -> principal" contract Cloudflare Access uses in prod).
+# The editor mints its own token from this on load — no other setup. It ships here
+# rather than in wrangler.jsonc on purpose: a deployed env never gets this value, so
+# the dev auth path stays fail-closed. In a deployed environment leave it unset; Access
+# is the only gate.
+DEV_AUTH_SECRET="dev-insecure-do-not-deploy"
+
+# --- Minimum lead ---
+# How long every send stays visible and cancelable before it fires
+# (https://github.com/LetRetroHQ/lettre/blob/main/docs/reference/01-configuration.md#min_lead_seconds).
+# Deployed environments default to 300 (five minutes); local dev uses the one-minute floor
+# that every environment shares, so a send scheduled a minute out behaves exactly as it
+# would deployed. Not a secret: a deployed environment sets it in its `vars` in
+# wrangler.jsonc. Below 60 or above 86400 (one day) is refused.
+MIN_LEAD_SECONDS="60"
+
+# --- Send simulation (local only) ---
+# On a list send, local dev stands in for a real provider instead of accepting everything
+# at once: the provider's batch size and pace, its failures, and delivery receipts that
+# arrive after the send (delivered, bounced, complained), all through the real send loop.
+# Test sends, confirmations, and notifications go straight to the dev outbox
+# (GET /api/dev/outbox), unfaulted. The profile names the provider modeled:
+#   ses      Amazon SES: a second of its send rate a request (up to 50), one request a
+#            second, no key (a lost request waits for Resolve), and its daily quota running
+#            out once a send; a slice a minute on the default SUBREQUEST_BUDGET, as SES is
+#            on Workers Free
+#   1        a generic provider paced to be watched: small, slow batches
+# Add ":none" (e.g. "ses:none") for a clean run with no failures, or set "off" for the
+# plain instant fake. "not-connected" runs the app as a deployment with no email provider
+# yet: every send refused, signups closed, a due send held. Switched back, the held send
+# goes out at its next retry, a few minutes later.
+# Add ":refuse=" and a cause (e.g. "ses:refuse=configuration") to have SES refuse every
+# email, tests, confirmations, and notifications included, as it would for that cause:
+# credentials, opt_in, configuration, sender, mail_from, paused, set_paused, suspended, or
+# unsupported. Email then reads as refusing and signups as paused. Beside a sandbox account
+# (SIMULATE_ACCOUNT=sandbox), SES refuses any recipient not at SENDING_DOMAIN or SES's
+# mailbox simulator.
+# For one run, set it in the shell instead: SIMULATE_SENDS=ses npm run dev
+# Only honored in a dev-shaped env (fake transport, no Access, APP_ORIGIN on localhost).
+SIMULATE_SENDS="ses"
+
+# --- SES account simulation (local only) ---
+# Stands in for the SES account the app reads, so Settings and the dashboard show a state a
+# real account would: sandbox, pending (AWS reviewing a request for production access),
+# denied, production, or permission (the AWS key isn't allowed to read the account). Add
+# ":unrouted" (e.g. "sandbox:unrouted") for bounces that reach no configuration set, which
+# shows the bounces warning, or one problem the account check finds, which shows its warning:
+# ":set_missing" or ":set_paused" (the configuration set), ":key_rejected" (SES rejects the
+# AWS key), ":sending_disabled" (sending turned off), ":shutdown" (AWS paused the account),
+# ":sender_unverified" (the From address isn't verified), or ":probation" (AWS reviewing the
+# account), e.g. "production:set_missing". A problem that stops every email also refuses every
+# simulated email with its cause (set_missing as configuration, key_rejected as credentials, and
+# so on), as the real account would, unless SIMULATE_SENDS names a refusal of its own. In the sandbox, a recipient outside SENDING_DOMAIN
+# and SES's mailbox simulator is refused. Needs SIMULATE_SENDS=ses; "off" leaves the account unread.
+# For one run, set it in the shell instead: SIMULATE_ACCOUNT=sandbox npm run dev
+SIMULATE_ACCOUNT="off"
