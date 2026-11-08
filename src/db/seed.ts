@@ -148,6 +148,7 @@ export async function resetAll(db: D1Database): Promise<void> {
     tombstoneSendsStmt(db, "1"),
     db.prepare("DELETE FROM sends"),
     db.prepare("DELETE FROM images"),
+    db.prepare("DELETE FROM media_assets"),
     db.prepare("DELETE FROM post_revisions"),
     db.prepare("DELETE FROM posts"),
     db.prepare("DELETE FROM suppressions"),

@@ -46,7 +46,7 @@ const UNREFERENCEABLE = /[\s\p{Cc}<>()[\]`#?%]+/gu;
  * upload names an image this way: an image stored before this rule keeps its name, and a
  * delete looks up exactly the name the post has.
  */
-function cleanName(name: string): string {
+export function cleanName(name: string): string {
   return baseName(name)
     .replace(UNREFERENCEABLE, "-")
     .replace(/^-+|-+$/g, "")
@@ -129,6 +129,13 @@ export async function uploadImage(c: RequestContext): Promise<Response> {
   let row: ImageRow | null = null;
   for (let n = 1; !row; n++) {
     const candidate = numberedName(filename, n);
+    // A detached image may still be publicly referenced. Never reuse its key.
+    const used = await c.env.DB.prepare("SELECT id FROM media_assets WHERE storage_key = ?")
+      .bind(storageKey(post.id, candidate))
+      .first();
+    if (used) {
+      continue;
+    }
     row = await images.insertImageIfNameFree(c.env.DB, {
       postId: post.id,
       filename: candidate,
@@ -139,11 +146,21 @@ export async function uploadImage(c: RequestContext): Promise<Response> {
     });
   }
   try {
-    await c.env.MEDIA.put(row.storage_key, bytes, { httpMetadata: { contentType } });
+    const written = await c.env.MEDIA.put(row.storage_key, bytes, {
+      httpMetadata: { contentType },
+      onlyIf: { etagDoesNotMatch: "*" },
+    });
+    if (!written) {
+      throw badRequest("This image address is already in use. Try uploading again.");
+    }
   } catch (e) {
     await images.deleteImageRow(c.env.DB, post.id, row.filename);
+    await c.env.DB.prepare("DELETE FROM media_assets WHERE id = ?").bind(row.id).run();
     throw e;
   }
+  await c.env.DB.prepare("UPDATE media_assets SET size = ? WHERE id = ?")
+    .bind(bytes.byteLength, row.id)
+    .run();
   const body: ImageUploadResponse = { image: publicImage(c, row) };
   return json(body, 201);
 }
@@ -165,7 +182,6 @@ export async function deleteImage(c: RequestContext): Promise<Response> {
   if (!row) {
     throw notFound("image");
   }
-  await c.env.MEDIA.delete(row.storage_key);
   await images.deleteImageRow(c.env.DB, post.id, filename);
   return json({ deleted: true });
 }

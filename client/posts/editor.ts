@@ -61,6 +61,7 @@ import { highlightMarkdown } from "../ui/highlight";
 import { type Html, html, setHtml } from "../ui/html";
 import { type IconName, icon } from "../ui/icons";
 import { busy, fieldError, modal, renderError, toast } from "../ui/widgets";
+import { mountLibrary } from "../uploads/library";
 import { bannerActedBy, whoActed } from "../who_acted";
 import { activeSend, postAction } from "./actions";
 import { createAutosave } from "./autosave";
@@ -267,7 +268,7 @@ export async function renderEditor(
         ${
           locked
             ? html`<div class="composer-foot composer-foot-lock" id="lockFoot" role="status">${icon("readonly")}<span>Cancel the schedule to edit</span></div>`
-            : html`<div class="composer-foot" id="dropFoot">${icon("paperclip")}<span>Paste, drop, or click to add images</span></div>`
+            : html`<div class="composer-foot" id="dropFoot">${icon("paperclip")}<span>Paste, drop, or click to add images</span><button type="button" id="openLibrary">Media library</button></div>`
         }
         <input type="file" id="imgInput" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
       </div>
@@ -1245,7 +1246,33 @@ export async function renderEditor(
         }
       }
     });
-    foot.onclick = () => imgInput.click();
+    foot.onclick = (event) => {
+      if (!(event.target instanceof Element) || !event.target.closest("button")) {
+        imgInput.click();
+      }
+    };
+    $("#openLibrary").onclick = () => {
+      const dialog = modal(
+        html`<h3 id="libraryTitle">Insert an image</h3><div id="libraryPicker"></div><div class="actions"><button type="button" id="closeLibrary">Close</button></div>`,
+        signal,
+      );
+      $(".modal", dialog.el).setAttribute("aria-labelledby", "libraryTitle");
+      $("#closeLibrary", dialog.el).onclick = dialog.close;
+      mountLibrary($("#libraryPicker", dialog.el), signal, async (asset) => {
+        const { image } = await api<{ image: { filename: string } }>(
+          `/api/posts/${id}/images/from-library/${encodeURIComponent(asset.id)}`,
+          { method: "POST" },
+        );
+        const start = ta.selectionStart;
+        const snippet = `\n![${image.filename}](${image.filename})\n`;
+        ta.value = ta.value.slice(0, start) + snippet + ta.value.slice(ta.selectionEnd);
+        ta.selectionStart = ta.selectionEnd = start + snippet.length;
+        markEdited();
+        dialog.close();
+        ta.focus();
+        toast("Image added");
+      });
+    };
     imgInput.onchange = () => {
       for (const f of imgInput.files ?? []) {
         uploadAndInsert(f);

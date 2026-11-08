@@ -20,7 +20,7 @@ describe("the migrations the schema gate expects (SPEC §9)", () => {
 // The exact set, not a containment check: a table a migration adds or drops has to be
 // named here, so the list can't silently fall behind the schema.
 describe("schema (every migration applied)", () => {
-  it("has exactly the app's fifteen tables", async () => {
+  it("has exactly the app's tables", async () => {
     const { results } = await env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name <> 'd1_migrations'",
     ).all<{ name: string }>();
@@ -29,6 +29,7 @@ describe("schema (every migration applied)", () => {
         // 0001_init
         "deliveries",
         "images",
+        "media_assets",
         "notifications",
         "post_revisions",
         "posts",
