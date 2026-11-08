@@ -1253,10 +1253,12 @@ export async function renderEditor(
     };
     $("#openLibrary").onclick = () => {
       const dialog = modal(
-        html`<h3 id="libraryTitle">Insert an image</h3><div id="libraryPicker"></div><div class="actions"><button type="button" id="closeLibrary">Close</button></div>`,
+        html`<div class="media-picker-head"><div><p class="media-eyebrow">YOUR LIBRARY</p><h3 id="libraryTitle">Insert an image</h3><p class="hint">Choose an image to add to your draft.</p></div></div><div id="libraryPicker"></div><div class="actions media-picker-footer"><button type="button" id="closeLibrary">Close</button></div>`,
         signal,
       );
-      $(".modal", dialog.el).setAttribute("aria-labelledby", "libraryTitle");
+      const picker = $(".modal", dialog.el);
+      picker.classList.add("media-picker-dialog");
+      picker.setAttribute("aria-labelledby", "libraryTitle");
       $("#closeLibrary", dialog.el).onclick = dialog.close;
       mountLibrary($("#libraryPicker", dialog.el), signal, async (asset) => {
         const { image } = await api<{ image: { filename: string } }>(
