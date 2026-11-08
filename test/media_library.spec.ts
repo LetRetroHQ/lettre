@@ -83,6 +83,9 @@ describe("publication media library", () => {
         Date.now(),
       )
       .run();
+    await env.DB.prepare("UPDATE media_assets SET ready = 1 WHERE storage_key = ?")
+      .bind(`posts/${post}/old photo.png`)
+      .run();
     const data = await readJson(
       await SELF.fetch(`${base}/api/media?search=old%20photo`, { headers: AUTH }),
     );
@@ -91,6 +94,95 @@ describe("publication media library", () => {
       { method: "POST", headers: AUTH },
     );
     expect((await readJson(response)).image.filename).toBe("old-photo.png");
+  });
+  it("encodes legacy keys for the library, the post API and rendered Markdown", async () => {
+    const post = await draft();
+    const key = `posts/${post}/old #?% photo.png`;
+    await env.MEDIA.put(key, PNG_1x1, { httpMetadata: { contentType: "image/png" } });
+    await env.DB.prepare(
+      "INSERT INTO images (id, post_id, filename, storage_key, content_type, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+      .bind(crypto.randomUUID(), post, "old #?% photo.png", key, "image/png", Date.now())
+      .run();
+    await env.DB.prepare("UPDATE media_assets SET ready = 1 WHERE storage_key = ?").bind(key).run();
+    const data = await readJson(
+      await SELF.fetch(`${base}/api/media?search=old`, { headers: AUTH }),
+    );
+    const asset = data.assets.find((a: { filename: string }) => a.filename === "old #?% photo.png");
+    expect(asset.url).toContain("old%20%23%3F%25%20photo.png");
+    expect((await SELF.fetch(asset.url)).status).toBe(200);
+    const attached = await readJson(
+      await SELF.fetch(`${base}/api/posts/${post}/images`, { headers: AUTH }),
+    );
+    expect(
+      attached.images.find((i: { filename: string }) => i.filename === asset.filename).url,
+    ).toBe(asset.url);
+    const reuse = await readJson(
+      await SELF.fetch(`${base}/api/posts/${post}/images/from-library/${asset.id}`, {
+        method: "POST",
+        headers: AUTH,
+      }),
+    );
+    const current = await readJson(
+      await SELF.fetch(`${base}/api/posts/${post}`, { headers: AUTH }),
+    );
+    const saved = await SELF.fetch(`${base}/api/posts/${post}`, {
+      method: "PUT",
+      headers: { ...AUTH, "content-type": "application/json" },
+      body: JSON.stringify({
+        markdown: `![photo](${reuse.image.filename})`,
+        base_revision: current.post.current_revision,
+      }),
+    });
+    expect(saved.status).toBe(200);
+    const preview = await SELF.fetch(`${base}/api/posts/${post}/preview`, { headers: AUTH });
+    expect(await preview.text()).toContain("old%20%23%3F%25%20photo.png");
+  });
+  it("attaches an asset only once when requests race", async () => {
+    const post = await draft();
+    const { asset } = await readJson(await upload("/api/media", "race.png"));
+    const attach = () =>
+      SELF.fetch(`${base}/api/posts/${post}/images/from-library/${asset.id}`, {
+        method: "POST",
+        headers: AUTH,
+      });
+    const responses = await Promise.all(Array.from({ length: 8 }, attach));
+    expect(responses.every((response) => response.ok)).toBe(true);
+    const names = await Promise.all(
+      responses.map(async (response) => (await readJson(response)).image.filename),
+    );
+    expect(new Set(names)).toEqual(new Set(["race.png"]));
+    const rows = await env.DB.prepare("SELECT filename FROM images WHERE post_id = ?")
+      .bind(post)
+      .all();
+    expect(rows.results).toHaveLength(1);
+  });
+  it("rejects zero dimensions before storing an image and hides incomplete uploads", async () => {
+    const zero = PNG_1x1.slice();
+    zero.fill(0, 16, 20);
+    expect((await upload("/api/media", "zero.png", "image/png", zero)).status).toBe(400);
+    const post = await draft();
+    expect((await upload(`/api/posts/${post}/images`, "zero.png", "image/png", zero)).status).toBe(
+      400,
+    );
+    const id = crypto.randomUUID();
+    await env.DB.prepare(
+      "INSERT INTO images (id, post_id, filename, storage_key, content_type, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+      .bind(id, post, "pending.png", `posts/${post}/pending.png`, "image/png", Date.now())
+      .run();
+    const library = await readJson(
+      await SELF.fetch(`${base}/api/media?search=pending`, { headers: AUTH }),
+    );
+    expect(library.assets).toEqual([]);
+    expect(
+      (
+        await SELF.fetch(`${base}/api/posts/${post}/images/from-library/${id}`, {
+          method: "POST",
+          headers: AUTH,
+        })
+      ).status,
+    ).toBe(404);
   });
   it("uploads distinct objects for duplicate names and validates image types and sizes", async () => {
     const a = await readJson(await upload("/api/media"));

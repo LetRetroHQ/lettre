@@ -1,5 +1,6 @@
 /** Resolve Markdown image references to absolute, email-safe URLs. */
 import type { ImageRow } from "../db/images";
+import { mediaUrl } from "../lib/media_url";
 
 export function buildImageMap(images: ImageRow[]): Map<string, ImageRow> {
   const map = new Map<string, ImageRow>();
@@ -31,7 +32,7 @@ export function resolveImageSrc(
   const key = ownMediaKey(href, mediaBase);
   if (key !== null) {
     const image = [...images.values()].find((img) => img.storage_key === key) ?? null;
-    return { url: image ? `${mediaBase}/${image.storage_key}` : href, image, ownMedia: true };
+    return { url: image ? mediaUrl(mediaBase, image.storage_key) : href, image, ownMedia: true };
   }
   if (/^https?:\/\//i.test(href) || href.startsWith("data:") || href.startsWith("cid:")) {
     return { url: href, image: null, ownMedia: false };
@@ -39,7 +40,7 @@ export function resolveImageSrc(
   const name = href.split("/").pop() ?? href;
   const image = images.get(name) ?? images.get(href) ?? null;
   if (image) {
-    return { url: `${mediaBase}/${image.storage_key}`, image, ownMedia: false };
+    return { url: mediaUrl(mediaBase, image.storage_key), image, ownMedia: false };
   }
   return { url: href, image: null, ownMedia: false };
 }

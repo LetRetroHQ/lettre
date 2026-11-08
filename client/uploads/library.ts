@@ -1,3 +1,5 @@
+// Publication image browser shared by the Uploads page and the post editor picker.
+
 import { api, describeError } from "../api";
 import { setTitle } from "../lifecycle";
 import { copyWith } from "../ui/copy";

@@ -1056,6 +1056,7 @@ export function createRouter({
       resource: "posts",
       title: "Use a library image",
       summary: "Attach a library image to a draft.",
+      errors: [notDraft],
       handler: mediaRoutes.useMedia,
     },
 

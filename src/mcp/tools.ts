@@ -741,7 +741,7 @@ export const TOOL_DEFS: ToolDef[] = [
     name: "delete_draft",
     title: "Delete a draft",
     description:
-      "Delete a draft for good, with its revisions and its images: nothing brings it back. Only a draft the publisher names, and only once you've named its subject back to them, said its versions and images go too, and they've said yes. A scheduled or sent post is refused.",
+      "Delete a draft for good, with its revisions and image attachments: nothing brings it back. Image objects remain in the library. Only a draft the publisher names, and only once you've named its subject back to them, said its versions and image attachments go too, and they've said yes. A scheduled or sent post is refused.",
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     routes: [DELETE_POST],
     args: { id: pick(DELETE_POST, "path", "id") },

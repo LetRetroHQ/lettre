@@ -80,3 +80,43 @@ export async function deleteImageRow(
     .bind(postId, filename)
     .run();
 }
+
+/** All attachments to one object, including legacy names that cannot be used in Markdown. */
+export async function listImagesByStorageKey(
+  db: D1Database,
+  postId: string,
+  key: string,
+): Promise<ImageRow[]> {
+  const { results } = await db
+    .prepare("SELECT * FROM images WHERE post_id = ? AND storage_key = ? ORDER BY created_at, id")
+    .bind(postId, key)
+    .all<ImageRow>();
+  return results;
+}
+
+/** Atomically attach an object unless another request already attached a usable alias. */
+export async function attachImageIfAbsent(
+  db: D1Database,
+  input: ImageInput,
+  ignoredIds: string[],
+): Promise<ImageRow | null> {
+  return db
+    .prepare(`INSERT INTO images (id, post_id, filename, storage_key, content_type, width, height, created_at)
+    SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (
+      SELECT 1 FROM images WHERE post_id = ? AND storage_key = ? AND id NOT IN (SELECT value FROM json_each(?))
+    ) ON CONFLICT (post_id, filename) DO NOTHING RETURNING *`)
+    .bind(
+      newId(),
+      input.postId,
+      input.filename,
+      input.storageKey,
+      input.contentType,
+      input.width,
+      input.height,
+      Date.now(),
+      input.postId,
+      input.storageKey,
+      JSON.stringify(ignoredIds),
+    )
+    .first<ImageRow>();
+}

@@ -6,6 +6,7 @@ import { badRequest, json, notFound } from "../lib/errors";
 import { newId } from "../lib/ids";
 import { probeImageDimensions } from "../lib/image_dims";
 import { mediaType, RASTER_IMAGE_TYPES } from "../lib/image_types";
+import { mediaUrl } from "../lib/media_url";
 import { param, type RequestContext } from "../router";
 import { cleanName, MAX_POST_IMAGE_BYTES } from "./images";
 import { requireDraft } from "./posts";
@@ -23,7 +24,7 @@ interface Asset {
 
 function publicAsset(c: RequestContext, asset: Asset) {
   const { storage_key, ...metadata } = asset;
-  return { ...metadata, url: `${c.config.mediaPublicBase}/${storage_key}` };
+  return { ...metadata, url: mediaUrl(c.config.mediaPublicBase, storage_key) };
 }
 
 export async function listMedia(c: RequestContext): Promise<Response> {
@@ -34,7 +35,7 @@ export async function listMedia(c: RequestContext): Promise<Response> {
   const offset = Number(raw);
   const search = (c.url.searchParams.get("search") ?? "").trim().slice(0, 200);
   const pattern = `%${search.replace(/[\\%_]/g, "\\$&")}%`;
-  const where = "hidden = 0 AND filename LIKE ? ESCAPE '\\'";
+  const where = "hidden = 0 AND ready = 1 AND filename LIKE ? ESCAPE '\\'";
   const count = await c.env.DB.prepare(`SELECT COUNT(*) AS total FROM media_assets WHERE ${where}`)
     .bind(pattern)
     .first<{ total: number }>();
@@ -70,6 +71,9 @@ export async function uploadMedia(c: RequestContext): Promise<Response> {
   }
   const bytes = await file.arrayBuffer();
   const dims = probeImageDimensions(new Uint8Array(bytes));
+  if (dims && (dims.width <= 0 || dims.height <= 0)) {
+    throw badRequest("An image must have positive dimensions.", { field: "file" });
+  }
   const id = newId();
   const key = `library/${id}/${filename}`;
   await c.env.MEDIA.put(key, bytes, { httpMetadata: { contentType: type } });
@@ -115,36 +119,46 @@ export async function hideMedia(c: RequestContext): Promise<Response> {
 
 export async function useMedia(c: RequestContext): Promise<Response> {
   const post = await requireDraft(c);
-  const asset = await c.env.DB.prepare("SELECT * FROM media_assets WHERE id = ? AND hidden = 0")
+  const asset = await c.env.DB.prepare(
+    "SELECT * FROM media_assets WHERE id = ? AND hidden = 0 AND ready = 1",
+  )
     .bind(param(c, "assetId"))
     .first<Asset>();
   if (!asset) {
     throw notFound("image");
   }
-  // If already attached, use its existing Markdown name.
-  const existing = await c.env.DB.prepare(
-    "SELECT * FROM images WHERE post_id = ? AND storage_key = ?",
-  )
-    .bind(post.id, asset.storage_key)
-    .first<images.ImageRow>();
-  if (existing && cleanName(existing.filename) === existing.filename) {
-    return json({ image: { filename: existing.filename } });
+  // Ignore legacy names that cannot be used in Markdown; a safe alias is created once.
+  const attached = await images.listImagesByStorageKey(c.env.DB, post.id, asset.storage_key);
+  const reusable = attached.find((row) => cleanName(row.filename) === row.filename);
+  if (reusable) {
+    return json({ image: { filename: reusable.filename } });
   }
+  const ignored = attached.map((row) => row.id);
   const name = cleanName(asset.filename) || "image";
   for (let n = 1; ; n++) {
     const dot = name.lastIndexOf(".");
     const filename =
       n === 1 ? name : dot > 0 ? `${name.slice(0, dot)}-${n}${name.slice(dot)}` : `${name}-${n}`;
-    const row = await images.insertImageIfNameFree(c.env.DB, {
-      postId: post.id,
-      filename,
-      storageKey: asset.storage_key,
-      contentType: asset.content_type,
-      width: asset.width,
-      height: asset.height,
-    });
+    const row = await images.attachImageIfAbsent(
+      c.env.DB,
+      {
+        postId: post.id,
+        filename,
+        storageKey: asset.storage_key,
+        contentType: asset.content_type,
+        width: asset.width,
+        height: asset.height,
+      },
+      ignored,
+    );
     if (row) {
       return json({ image: { filename: row.filename } }, 201);
+    }
+    const winner = (await images.listImagesByStorageKey(c.env.DB, post.id, asset.storage_key)).find(
+      (image) => !ignored.includes(image.id),
+    );
+    if (winner) {
+      return json({ image: { filename: winner.filename } });
     }
   }
 }

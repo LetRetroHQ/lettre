@@ -282,6 +282,7 @@ export async function insertImage(db: D1Database, row: SeedImage): Promise<void>
       row.created_at,
     )
     .run();
+  await db.prepare("UPDATE media_assets SET ready = 1 WHERE id = ?").bind(row.id).run();
 }
 
 export async function insertSend(db: D1Database, row: SeedSend): Promise<void> {
