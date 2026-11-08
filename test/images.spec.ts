@@ -115,13 +115,13 @@ describe("images", () => {
     });
     expect(del.status).toBe(200);
 
-    // Gone from the list, the table, and the bucket; the sibling untouched in all three.
+    // Detached from the draft; both public objects remain available.
     expect(await listed()).toEqual(["b.png"]);
     const rows = await env.DB.prepare("SELECT filename FROM images WHERE post_id = ?")
       .bind(id)
       .all<{ filename: string }>();
     expect(rows.results.map((r) => r.filename)).toEqual(["b.png"]);
-    expect((await SELF.fetch(`${base}/media/posts/${id}/a.png`)).status).toBe(404);
+    expect((await SELF.fetch(`${base}/media/posts/${id}/a.png`)).status).toBe(200);
     expect((await SELF.fetch(`${base}/media/posts/${id}/b.png`)).status).toBe(200);
   });
 
@@ -217,7 +217,7 @@ describe("images", () => {
       { method: "DELETE", headers: AUTH },
     );
     expect(del.status).toBe(200);
-    expect(await env.MEDIA.get(key)).toBeNull();
+    expect(await env.MEDIA.get(key)).not.toBeNull();
   });
 
   it("deletes an upload by the name it answered, which is not the name sent (SPEC §4)", async () => {
@@ -228,7 +228,7 @@ describe("images", () => {
       headers: AUTH,
     });
     expect(del.status).toBe(200);
-    expect((await SELF.fetch(`${base}/media/posts/${id}/${image.filename}`)).status).toBe(404);
+    expect((await SELF.fetch(`${base}/media/posts/${id}/${image.filename}`)).status).toBe(200);
   });
 
   describe("a name the post already has (SPEC §4)", () => {
@@ -289,14 +289,14 @@ describe("images", () => {
       expect(await sendBytes(two, "image.png", PNG_1x1.length)).toBe("image.png");
     });
 
-    it("is free again once the image holding it is deleted", async () => {
+    it("keeps the old URL distinct when an image is detached and uploaded again", async () => {
       const id = await newDraft("Freed");
       await sendBytes(id, "image.png", PNG_1x1.length);
       await SELF.fetch(`${base}/api/posts/${id}/images/image.png`, {
         method: "DELETE",
         headers: AUTH,
       });
-      expect(await sendBytes(id, "image.png", PNG_1x1.length)).toBe("image.png");
+      expect(await sendBytes(id, "image.png", PNG_1x1.length)).toBe("image-2.png");
     });
   });
 

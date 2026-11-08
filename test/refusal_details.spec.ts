@@ -304,6 +304,11 @@ const CASES: Case[] = [
     run: async () => call("PUT", `/api/posts/${await linked()}/settings`, { slug: "moved" }),
   },
   {
+    refusal: "POST /api/posts/:id/images/from-library/:assetId post_not_draft",
+    when: "attaching a library image to a scheduled post",
+    run: async () => call("POST", `/api/posts/${(await scheduled()).id}/images/from-library/asset`),
+  },
+  {
     refusal: "POST /api/posts/:id/images post_not_draft",
     when: "an image for a scheduled post",
     run: async () => upload(`/api/posts/${(await scheduled()).id}/images`),

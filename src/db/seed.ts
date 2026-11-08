@@ -148,6 +148,7 @@ export async function resetAll(db: D1Database): Promise<void> {
     tombstoneSendsStmt(db, "1"),
     db.prepare("DELETE FROM sends"),
     db.prepare("DELETE FROM images"),
+    db.prepare("DELETE FROM media_assets"),
     db.prepare("DELETE FROM post_revisions"),
     db.prepare("DELETE FROM posts"),
     db.prepare("DELETE FROM suppressions"),
@@ -281,6 +282,7 @@ export async function insertImage(db: D1Database, row: SeedImage): Promise<void>
       row.created_at,
     )
     .run();
+  await db.prepare("UPDATE media_assets SET ready = 1 WHERE id = ?").bind(row.id).run();
 }
 
 export async function insertSend(db: D1Database, row: SeedSend): Promise<void> {

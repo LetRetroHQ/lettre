@@ -63,6 +63,7 @@ import * as docsRoutes from "./routes/docs";
 import * as imageRoutes from "./routes/images";
 import * as importRoutes from "./routes/imports";
 import * as llmsRoutes from "./routes/llms";
+import * as mediaRoutes from "./routes/media_library";
 import * as postRoutes from "./routes/posts";
 import * as providerRoutes from "./routes/provider";
 import * as publicRoutes from "./routes/public";
@@ -941,7 +942,7 @@ export function createRouter({
       title: "Delete a post",
       summary: "Delete a draft and its revisions.",
       description:
-        "Its images go with it. Answers `{ deleted: true }`; a repeat, with the post gone, is a 404.",
+        "Its image attachments go with it; public image objects remain in the library. Answers `{ deleted: true }`; a repeat, with the post gone, is a 404.",
       errors: [notDraft],
       handler: postRoutes.deletePost,
     },
@@ -1005,6 +1006,58 @@ export function createRouter({
       summary: "One revision by its number.",
       returns: { object: "revision" },
       handler: postRoutes.getRevision,
+    },
+
+    // --- publication media library ---
+    {
+      method: "GET",
+      path: "/api/media",
+      access: "admin",
+      resource: "posts",
+      title: "Browse uploads",
+      summary: "Browse publication images.",
+      query: [
+        { name: "search", description: "Filter by filename." },
+        { name: "offset", description: "Page offset." },
+      ],
+      handler: mediaRoutes.listMedia,
+    },
+    {
+      method: "POST",
+      path: "/api/media",
+      access: "admin",
+      resource: "posts",
+      accepts: FORM_UPLOAD,
+      title: "Upload to library",
+      summary: "Upload an image to the publication library.",
+      body: [
+        {
+          name: "file",
+          type: "file",
+          required: true,
+          description: "PNG, JPEG, WebP, or GIF, up to 5 MB.",
+        },
+      ],
+      handler: mediaRoutes.uploadMedia,
+    },
+    {
+      method: "DELETE",
+      path: "/api/media/:assetId",
+      access: "admin",
+      resource: "posts",
+      title: "Remove from library",
+      summary: "Hide an image from the library while retaining its public URL.",
+      handler: mediaRoutes.hideMedia,
+    },
+    {
+      method: "POST",
+      path: "/api/posts/:id/images/from-library/:assetId",
+      access: "admin",
+      resource: "posts",
+      title: "Use a library image",
+      summary: "Attach a library image to a draft.",
+      errors: [notDraft],
+      handler: mediaRoutes.useMedia,
     },
 
     // --- images (authed upload/list/delete) ---
@@ -1090,7 +1143,7 @@ export function createRouter({
       title: "Delete an image",
       summary: "Delete one image from a draft.",
       description:
-        "`filename` is the name the upload answered. The Markdown is left as it is, so a reference to the image no longer resolves and its render warns. Answers `{ deleted: true }`; a repeat, with the image gone, is a 404.",
+        "`filename` is the name the upload answered. The image is detached from the draft, but its public object remains available. The Markdown is left as it is, so a reference to the image no longer resolves and its render warns. Answers `{ deleted: true }`; a repeat, with the image gone, is a 404.",
       errors: [notDraft],
       handler: imageRoutes.deleteImage,
     },

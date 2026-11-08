@@ -11,7 +11,6 @@ import type {
   RevisionResponse,
   StaleRevisionError,
 } from "../../shared/posts";
-import * as images from "../db/images";
 import * as posts from "../db/posts";
 import { currentSendSeq, getActiveSendForPost } from "../db/sends";
 import { fieldError, optBoolean, optString, optStringOrNull, readJsonObject } from "../lib/body";
@@ -228,8 +227,6 @@ export async function updatePost(c: RequestContext): Promise<Response> {
 
 export async function deletePost(c: RequestContext): Promise<Response> {
   const post = await requireDraft(c);
-  const imgs = await images.listImages(c.env.DB, post.id);
-  await Promise.all(imgs.map((i) => c.env.MEDIA.delete(i.storage_key)));
   await posts.deletePost(c.env.DB, post.id);
   return json({ deleted: true });
 }

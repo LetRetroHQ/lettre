@@ -586,7 +586,7 @@ export async function updatePost(
  * `requireDraft`), and a post is only a draft with no sent post behind it: a
  * scheduled or sent post can't reach here, so the only sends present are the
  * `canceled` ones a cancel leaves behind — a sent post's record is never
- * deleted. R2 image objects are deleted by the caller.
+ * deleted. Media objects remain in the publication library.
  */
 export async function deletePost(db: D1Database, id: string): Promise<void> {
   await db.batch([

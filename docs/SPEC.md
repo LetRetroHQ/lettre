@@ -20,7 +20,7 @@ The foundation that makes all of this work is a single HTTP API. Everything the 
 
 ![The publisher drives the web editor and asks Claude, and both reach Lettre only through its authoring API, which reads and writes the database and object storage and hands email to the email provider. The provider delivers it to readers, who come back through the public pages (subscribe, confirm, unsubscribe, and the archive), which read the same store. The provider reports deliveries, bounces, and complaints through signed webhooks, which record them in the store without passing through the authoring API.](spec-overview.svg)
 
-Content lives in the app's own database, with every version of a post kept as a revision. Images are uploaded to a post and referenced by name; the publisher never touches an upload URL. Every send freezes the rendered email, and that frozen copy *is* both the reader's post page, where an email's "view in browser" link leads, and the permanent record of what went out.
+Content lives in the app's own database, with every version of a post kept as a revision. Images are stored in a publication-wide library and attached to posts by name; the editor can insert a library image or upload a new one. Every send freezes the rendered email, and that frozen copy *is* both the reader's post page, where an email's "view in browser" link leads, and the permanent record of what went out.
 
 ### What it isn't
 
@@ -50,7 +50,7 @@ Six nouns make up the whole domain: the first three are content, the last three 
 
 **Revision** — a saved version of a post's Markdown and metadata. Every save writes one. This is the versioning that files would have given for free, handed back deliberately.
 
-**Image** — a file belonging to a post, referenced by name in the Markdown. The app stores it, sizes it, and resolves it to an absolute URL at render time.
+**Image** — a public image object in the publication library. A post attaches it under a name in Markdown; the app stores it, sizes it, and resolves that name to its stable URL at render time.
 
 **Subscriber** — an email address with a consent state: pending, confirmed, or unsubscribed. Only confirmed subscribers receive sends. Beside the state, a subscriber carries how they joined (through this app's double opt-in, or carried in with a list brought from elsewhere) and, once they have left, why (§7).
 
@@ -109,7 +109,9 @@ Subject is deliberately the primary field. For an email that is what the reader 
 
 Every save writes a revision holding the whole post as saved, so every earlier version reads back as it was written. The editor and Claude, or two tabs, can have one draft open at once, so a save names the revision it was made from, and one made from a revision the post has since moved past is refused rather than overwriting the newer one: the refusal carries the post as it stands and who wrote its newer revision, so no one's words are lost without their knowing.
 
-Images are uploaded to the post they belong to and referenced by name in its Markdown; the render resolves each name to the image's address, so the publisher never handles an upload URL. An upload is stored under a name that works as a reference: whitespace and the characters that would break one each become a hyphen, keeping the name's case, so the name to reference is the one the upload answers, which may differ from the name sent. An image stored before this rule keeps its name. An upload never replaces an image: a name the post already has gets a number, since a browser gives every pasted image the same name, and an image replaced at one address could keep showing its old bytes from a cache. A reference by an image's full address on this instance is checked as a name is: the preview says to use the name when the image is this post's, and warns that it isn't on this post when it's another post's or has been deleted, since deleting either would break the sent email and its archive page. An image on another host is the publisher's own and passes through unchecked.
+Images are uploaded in the editor or the Uploads page, and collected in the publication library. A publisher may browse, search, preview, copy an image URL, or attach an image to another draft from the editor. A post references its attached image by name in Markdown; the render resolves the name to its public address. Uploads accept PNG, JPEG, WebP, and GIF up to 5 MB. An upload is stored under a name that works as a reference: whitespace and the characters that would break one each become a hyphen, keeping the name's case, so the name to reference is the one the upload answers, which may differ from the name sent. An image stored before this rule keeps its name. An upload never replaces an image: a name the post already has gets a number, since a browser gives every pasted image the same name, and an image replaced at one address could keep showing its old bytes from a cache. A reference by an image's full address on this instance is checked as a name is: the preview says to use the name when the image is this post's, and warns that it isn't on this post when it's another post's or has been deleted, because the address is not attached to this post. An image on another host is the publisher's own and passes through unchecked.
+
+Removing an image from the library hides it from the library; it does not delete its R2 object or revoke its public URL. Detaching an image or deleting a draft also retains the object, because a copied URL, sent email, or frozen archive might still use it. The library cannot currently restore hidden items or permanently delete them; bucket storage remains until the operator manages it outside Lettre. Existing post uploads are indexed during migration and retain their original URLs.
 
 The preview also warns when text that reads as an image reference didn't become an image, since readers would see it typed out, and when an image uploaded to the post isn't referenced by it, since that is often a reference that went wrong. A warning never changes the email.
 
@@ -660,7 +662,7 @@ An index of what was decided and the alternative each choice was made over, in t
 - **A slug follows the subject until set by hand, and the post records which**, over inferring it from the slug's shape (§4).
 - **A slug is held from a post's first save and a duplicate is refused, not renamed**, over numbering a duplicate silently, and over holding slugs only once they are public (§4).
 - **Notify, don't clobber: a save from an older revision is refused**, over last-write-wins for concurrent edits (§4).
-- **Images belong to the post and are referenced by name**, over an upload that returns a URL to paste (§4).
+- **Images are referenced by name in a post**, with reusable public objects in the publication library (§4).
 - **The send's frozen copy is the record, and the post's page serves it**, over a separate store of what each email looked like (§3, §5).
 - **A post is published when its send starts**, over when it finishes (§5).
 - **Archive pages carry light public chrome** filled into reserved anchors, over a bare frozen render (§5).

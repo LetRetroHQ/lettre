@@ -30,6 +30,7 @@ const TABLES = [
   "send_acts",
   "sends",
   "images",
+  "media_assets",
   "post_revisions",
   "posts",
   "suppressions",

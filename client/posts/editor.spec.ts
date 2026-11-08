@@ -2308,6 +2308,44 @@ describe("editor view", () => {
     );
   });
 
+  it("inserts a shared library image at the caret using its draft attachment name", async () => {
+    await open([
+      { path: "/api/posts/p1", reply: () => draft() },
+      {
+        path: "/api/media",
+        reply: () => ({
+          assets: [
+            {
+              id: "asset1",
+              filename: "owl.png",
+              url: "https://media.test/owl.png",
+              content_type: "image/png",
+              width: 1,
+              height: 1,
+              size: 20,
+              created_at: 1700000000000,
+            },
+          ],
+          total: 1,
+          offset: 0,
+          limit: 24,
+        }),
+      },
+      {
+        method: "POST",
+        path: "/api/posts/p1/images/from-library/asset1",
+        reply: () => ({ image: { filename: "owl-2.png" } }),
+      },
+    ]);
+    body().setSelectionRange(0, 0);
+    $("#openLibrary").click();
+    await vi.advanceTimersByTimeAsync(0);
+    $("[data-use-id]").click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(body().value).toMatch(/^\n!\[owl-2\.png\]\(owl-2\.png\)\n# Owls/);
+    expect($("#saveStatus").textContent).toBe("Unsaved changes");
+  });
+
   it("uploads a picked image and inserts it at the caret", async () => {
     await open([
       { path: "/api/posts/p1", reply: () => draft() },

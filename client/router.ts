@@ -18,6 +18,7 @@ import { setNavOpen } from "./shell";
 import { renderImport } from "./subscribers/import";
 import { LIST_FILTERS, renderSubscribers } from "./subscribers/list";
 import { renderSubscriber } from "./subscribers/subscriber";
+import { renderUploads } from "./uploads/library";
 
 const LEAVE_MSG = "You have unsaved changes. Leave without saving?";
 
@@ -67,6 +68,9 @@ export function route(): Promise<void> {
   }
   if (webPost !== null) {
     return mount((root, signal) => renderWebVersion(webPost, root, signal));
+  }
+  if (view === "uploads") {
+    return mount(renderUploads);
   }
   if (view === "drafts") {
     return mount(renderDrafts);

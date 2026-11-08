@@ -2,6 +2,7 @@
 import { Marked } from "marked";
 import type { ImageRow } from "../db/images";
 import { escapeHtmlAttr } from "../lib/html";
+import { mediaUrl } from "../lib/media_url";
 import { resolveImageSrc } from "./image_urls";
 
 export interface MarkdownContext {
@@ -73,7 +74,11 @@ export function markdownToHtml(md: string, ctx: MarkdownContext): string {
     // Raw HTML and a link reach an image by its address without passing the image renderer, and
     // what they write may be percent-encoded, HTML-escaped, or both.
     const address = `${ctx.mediaBase}/${image.storage_key}`;
-    const written = [address, encodeURI(address)].flatMap((a) => [a, escapeHtmlAttr(a)]);
+    const written = [
+      address,
+      encodeURI(address),
+      mediaUrl(ctx.mediaBase, image.storage_key),
+    ].flatMap((a) => [a, escapeHtmlAttr(a)]);
     if (!referenced.has(image) && !written.some((a) => html.includes(a))) {
       ctx.warnings.push(`The uploaded image “${image.filename}” isn’t used in this post.`);
     }
