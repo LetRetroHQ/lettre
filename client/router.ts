@@ -12,6 +12,7 @@ import { renderDocs } from "./room/docs";
 import { renderReference } from "./room/reference";
 import { renderSent } from "./sends/list";
 import { renderSentRecord } from "./sends/record";
+import { renderEmailSettings } from "./settings/email_settings";
 import { renderSettings } from "./settings/settings";
 import { renderTemplate } from "./settings/template";
 import { setNavOpen } from "./shell";
@@ -92,6 +93,9 @@ export function route(): Promise<void> {
   }
   if (view === "settings") {
     return mount(renderSettings);
+  }
+  if (view === "email-settings") {
+    return mount(renderEmailSettings);
   }
   if (view === "api-reference") {
     return mount((root, signal) => renderReference(root, signal, arg));

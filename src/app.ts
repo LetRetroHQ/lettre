@@ -60,6 +60,7 @@ import { actorOf, type BodyField, param, type RouteDef, type RouteRefusal, Route
 import * as archiveRoutes from "./routes/archive";
 import * as devRoutes from "./routes/dev";
 import * as docsRoutes from "./routes/docs";
+import * as emailSettingsRoutes from "./routes/email_settings";
 import * as imageRoutes from "./routes/images";
 import * as importRoutes from "./routes/imports";
 import * as llmsRoutes from "./routes/llms";
@@ -532,6 +533,34 @@ export function createRouter({
     },
 
     // --- app settings (authed; runtime preferences, never secrets) ---
+    {
+      method: "GET",
+      path: "/api/settings/email",
+      access: "admin",
+      resource: "settings",
+      title: "Get email settings",
+      summary:
+        "Read the active provider and whether Resend credentials are configured; credentials are never returned.",
+      handler: emailSettingsRoutes.get,
+    },
+    {
+      method: "PUT",
+      path: "/api/settings/email",
+      access: "admin",
+      accepts: JSON_BODY,
+      resource: "settings",
+      title: "Save Resend credentials",
+      summary: "Replace one or both Resend credentials, encrypted before storage.",
+      body: [
+        { name: "api_key", type: "string", description: "Resend API key; write-only." },
+        {
+          name: "webhook_secret",
+          type: "string",
+          description: "Resend webhook signing secret; write-only.",
+        },
+      ],
+      handler: emailSettingsRoutes.put,
+    },
     {
       method: "GET",
       path: "/api/settings",

@@ -28,6 +28,7 @@ describe("schema (every migration applied)", () => {
       [
         // 0001_init
         "deliveries",
+        "email_credentials",
         "images",
         "media_assets",
         "notifications",
