@@ -48,6 +48,8 @@ import {
 export type { ProviderName };
 
 export interface Secrets {
+  /** Base64-encoded 32-byte key for credentials entered through the dashboard. */
+  EMAIL_CREDENTIAL_KEY?: string;
   /**
    * Symmetric secret for signing/verifying the local-dev admin token. Ships in
    * `.dev.vars.example` (so `cp .dev.vars.example .dev.vars` gives a working dev

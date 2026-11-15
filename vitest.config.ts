@@ -37,6 +37,7 @@ export default defineConfig(async () => {
                   // Deterministic dev-token signing secret for auth tests. The env is
                   // dev-shaped (fake transport, no Access), so getConfig honors it.
                   DEV_AUTH_SECRET: "test-dev-secret",
+                  EMAIL_CREDENTIAL_KEY: "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
                   // The suite runs on the fake, named here, whatever a local `.dev.vars` sets
                   // (a PROVIDER there to preview another state would otherwise leave the env
                   // not dev-shaped and every authed spec a 401); a test that needs another

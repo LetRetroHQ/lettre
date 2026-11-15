@@ -34,6 +34,7 @@ export const SHIPPED_MIGRATIONS: readonly string[] = [
   "0021_notifications_outage_receipts.sql",
   "0022_media_library.sql",
   "0023_media_ready.sql",
+  "0024_email_credentials.sql",
 ];
 
 /**

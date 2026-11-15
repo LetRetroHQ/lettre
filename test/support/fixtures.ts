@@ -24,6 +24,7 @@ import { toNextTick } from "./clock";
 
 // Children before the rows they reference, so no delete trips a foreign key.
 const TABLES = [
+  "email_credentials",
   "deliveries",
   "notifications",
   "send_tombstones",
